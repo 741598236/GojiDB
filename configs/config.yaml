@@ -1,0 +1,71 @@
+app:
+    name: GojiDB
+    version: 2.1.0
+    description: 高性能键值存储数据库
+database:
+    data_dir: ../data
+    max_memory_mb: 512
+    auto_compact: true
+    compression: true
+    compression_level: 0
+    compression_type: ""
+    enable_smart_compression: true
+cli:
+    prompt: 'GojiDB> '
+    theme: default
+    show_banner: true
+    show_stats: true
+performance:
+    batch_size: 1000
+    flush_interval: 5
+    max_open_files: 1000
+logging:
+    level: info
+    file: ../data/gojidb.log
+    max_size_mb: 100
+    max_backups: 3
+features:
+    ttl_support: true
+    transaction_support: true
+    backup_support: true
+    metrics_support: true
+    wal_support: true
+
+
+cache:
+    block_cache_size: 1024
+    key_cache_size: 8192
+    enable_cache: true
+gojidb:
+    data_path: ../data
+    max_file_size: 67108864
+    compression_type: 1
+    sync_writes: true
+    compaction_threshold: 0.5
+    ttl_check_interval: 5m0s
+    enable_metrics: true
+    enable_ttl: true
+    enable_wal: true
+    wal_flush_interval: 100ms
+    wal_max_size: 104857600
+    wal_sync_writes: true
+    cache:
+        block_cache_size: 0
+        key_cache_size: 0
+        enable_cache: false
+    smart_compression:
+        min_size: 64
+        max_size: 1048576
+        compression_gain: 10
+        algorithm: auto
+        enable_adaptive: true
+        sample_size: 1024
+        enable_parallel: true
+        max_parallelism: 16
+        enable_streaming: true
+        enable_cache: true
+        cache_size: 10000
+        enable_dictionary: true
+        dictionary_size: 65536
+        enable_mixed_mode: true
+        chunk_size: 262144
