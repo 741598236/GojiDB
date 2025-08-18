@@ -1,4 +1,4 @@
-module gojidbv2
+module gojidb
 
 go 1.22
 
