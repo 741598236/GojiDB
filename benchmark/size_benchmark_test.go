@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"gojidb"
+	gojidb "GojiDB"
 )
 
 // BenchmarkSmallValue 基准测试小值存储
@@ -100,7 +100,7 @@ func BenchmarkVariableValue(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		key := fmt.Sprintf("var_%d", i)
-		
+
 		// 创建不同大小的值
 		var value []byte
 		switch i % 4 {
@@ -113,11 +113,11 @@ func BenchmarkVariableValue(b *testing.B) {
 		case 3:
 			value = make([]byte, 4096)
 		}
-		
+
 		for j := range value {
 			value[j] = byte(j % 256)
 		}
-		
+
 		if err := db.Put(key, value); err != nil {
 			b.Fatal(err)
 		}

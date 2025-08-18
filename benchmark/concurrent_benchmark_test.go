@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"gojidb"
+	gojidb "GojiDB"
 )
 
 // BenchmarkConcurrentPut 基准测试并发Put操作

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"gojidb"
+	gojidb "GojiDB"
 )
 
 // BenchmarkCacheHitRate 基准测试缓存命中率

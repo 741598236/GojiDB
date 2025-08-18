@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"gojidb"
+	gojidb "GojiDB"
 )
 
 // BenchmarkPut 基准测试单个Put操作

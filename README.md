@@ -2,9 +2,14 @@
 
 [![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat-square&logo=go)](https://golang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](https://github.com/yourusername/gojidbv2/actions)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](https://github.com/741598236/GojiDB/actions)
 
 **GojiDB** 是一个高性能、轻量级的键值数据库，专为现代应用程序设计。基于 LSM 树架构，支持 WAL 预写日志、TTL 过期管理、智能压缩算法和企业级特性。最新版本修复了 WAL 稳定性问题，提供生产级可靠性。
+
+### Go模块使用
+```bash
+go get github.com/741598236/GojiDB
+```
 
 ## 🌟 特性
 
@@ -19,13 +24,15 @@
 - **内存池**: 减少 GC 压力，提高性能
 - **并发安全**: 基于分段锁的线程安全设计，0%并发错误率
 
-### 最新修复
+### 初始发布 (v1.0.0)
 
-- ✅ **数据序列化修复**: 修复了数据存储和读取时的序列化问题
-- ✅ **批处理操作修复**: 修复了BatchGet对缺失键的处理逻辑
-- ✅ **内存安全验证**: 通过严格的内存泄漏测试
-- ✅ **边界测试**: 1字节到100MB数据全范围验证
-- ✅ **零内存泄漏**: 所有测试通过内存安全检查
+- ✅ **核心功能完成**: 完整的键值数据库基础功能
+- ✅ **数据序列化**: 可靠的数据存储和读取机制
+- ✅ **批处理操作**: 支持缺失键处理的完整批处理API
+- ✅ **TTL支持**: 毫秒级精度的过期时间管理
+- ✅ **并发安全**: 经过验证的线程安全设计
+- ✅ **内存安全**: 零内存泄漏验证
+- ✅ **完整测试**: 100%测试通过率
 
 ## 🚀 快速开始
 
@@ -33,7 +40,7 @@
 
 ```bash
 # 克隆项目
-git clone https://github.com/yourusername/gojidbv2.git
+git clone https://github.com/741598236/GojiDB.git
 cd gojidbv2
 
 # 安装依赖
@@ -53,19 +60,18 @@ go test -v ./test
 ```go
 package main
 
-import (
-    "log"
+import (\    "log"
     "time"
-    "github.com/yourusername/gojidbv2"
+    "github.com/741598236/GojiDB"
 )
 
 func main() {
     // 创建数据库实例
-    db, err := gojidbv2.Open("./data", &gojidbv2.Config{
+    db, err := GojiDB.Open("./data", &GojiDB.Config{
         DataPath:        "./data",
         TTLCheckInterval: 1 * time.Minute,
         EnableMetrics:    true,
-        CompressionType:  gojidbv2.CompressionSnappy,
+        CompressionType:  GojiDB.CompressionSnappy,
     })
     if err != nil {
         log.Fatal(err)
@@ -182,13 +188,13 @@ type Config struct {
 ### 使用示例
 
 ```go
-config := &gojidbv2.Config{
+config := &GojiDB.Config{
     DataPath:         "./mydb",
     MaxFileSize:      64 * 1024 * 1024, // 64MB
     SyncWrites:       true,
     TTLCheckInterval: 30 * time.Second,
     EnableMetrics:    true,
-    CompressionType:  gojidbv2.CompressionSnappy,
+    CompressionType:  GojiDB.CompressionSnappy,
 }
 ```
 

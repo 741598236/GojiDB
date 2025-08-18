@@ -1,4 +1,4 @@
-package gojidb
+package GojiDB
 
 import (
 	"hash/crc32"

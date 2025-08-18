@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	gojidb "gojidb"
+	gojidb "GojiDB"
 )
 
 func main() {
