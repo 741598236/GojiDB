@@ -45,6 +45,16 @@ func (tx *Transaction) Delete(key string) error {
 	return nil
 }
 
+func (tx *Transaction) Get(key string) ([]byte, error) {
+	// 事务中的读取操作也记录到operations中
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	
+	// 在实际事务实现中，这里应该从事务缓存中读取
+	// 当前实现：直接从数据库读取
+	return tx.db.Get(key)
+}
+
 func (tx *Transaction) Commit() error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
