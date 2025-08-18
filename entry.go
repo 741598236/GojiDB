@@ -62,52 +62,78 @@ func (db *GojiDB) compress(data []byte) ([]byte, CompressionType, error) {
 		return data, NoCompression, nil
 	}
 
-	// 使用智能压缩器进行压缩
-	if db.smartCompressor != nil {
-		compressed, algorithm, err := db.smartCompressor.CompressWithSmartChoice(data)
-		if err == nil && len(compressed) > 0 {
-			// 确保使用标准压缩类型，避免使用智能压缩器的特殊类型
-			// 这样可以确保解压时的一致性
-			return compressed, algorithm, err
-		}
-		// 如果智能压缩失败，回退到传统压缩
+	// 尝试智能压缩
+	if compressed, algorithm, ok := db.trySmartCompress(data); ok {
+		return compressed, algorithm, nil
 	}
 
-	var compressed []byte
-	var err error
-	algorithm := db.config.CompressionType
+	// 标准压缩
+	compressed, algorithm, err := db.performStandardCompress(data)
+	if err != nil {
+		return nil, NoCompression, err
+	}
 
+	// 更新压缩指标
+	db.updateCompressionMetrics(originalSize, len(compressed))
+	return compressed, algorithm, nil
+}
+
+// trySmartCompress 尝试使用智能压缩器
+func (db *GojiDB) trySmartCompress(data []byte) ([]byte, CompressionType, bool) {
+	if db.smartCompressor == nil {
+		return nil, NoCompression, false
+	}
+	
+	compressed, algorithm, err := db.smartCompressor.CompressWithSmartChoice(data)
+	if err != nil || len(compressed) == 0 {
+		return nil, NoCompression, false
+	}
+	
+	return compressed, algorithm, true
+}
+
+// performStandardCompress 执行标准压缩
+func (db *GojiDB) performStandardCompress(data []byte) ([]byte, CompressionType, error) {
 	switch db.config.CompressionType {
 	case SnappyCompression:
-		compressed = snappy.Encode(nil, data)
+		return snappy.Encode(nil, data), SnappyCompression, nil
 	case ZSTDCompression:
-		enc, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
-		defer enc.Close()
-		compressed = enc.EncodeAll(data, make([]byte, 0, len(data)))
+		return db.compressZSTD(data)
 	case GzipCompression:
-		var buf bytes.Buffer
-		w := gzip.NewWriter(&buf)
-		if _, err = w.Write(data); err != nil {
-			return nil, NoCompression, err
-		}
-		w.Close()
-		compressed = buf.Bytes()
+		return db.compressGzip(data)
 	default:
 		return data, NoCompression, nil
 	}
+}
 
-	// 计算并更新压缩比
-	if db.config.EnableMetrics && originalSize > 0 {
-		compressedSize := len(compressed)
-		if compressedSize > 0 {
-			ratio := float64(originalSize-compressedSize) / float64(originalSize)
-			// 使用原子操作更新压缩比
-			newRatio := int64(ratio * 10000) // 转换为百分比*100
-			atomic.StoreInt64(&db.metrics.CompressionRatio, newRatio)
-		}
+// compressZSTD 使用ZSTD压缩
+func (db *GojiDB) compressZSTD(data []byte) ([]byte, CompressionType, error) {
+	enc, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	defer enc.Close()
+	compressed := enc.EncodeAll(data, make([]byte, 0, len(data)))
+	return compressed, ZSTDCompression, nil
+}
+
+// compressGzip 使用Gzip压缩
+func (db *GojiDB) compressGzip(data []byte) ([]byte, CompressionType, error) {
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write(data); err != nil {
+		return nil, NoCompression, err
 	}
+	w.Close()
+	return buf.Bytes(), GzipCompression, nil
+}
 
-	return compressed, algorithm, err
+// updateCompressionMetrics 更新压缩指标
+func (db *GojiDB) updateCompressionMetrics(originalSize, compressedSize int) {
+	if !db.config.EnableMetrics || originalSize <= 0 || compressedSize <= 0 {
+		return
+	}
+	
+	ratio := float64(originalSize-compressedSize) / float64(originalSize)
+	newRatio := int64(ratio * 10000) // 转换为百分比*100
+	atomic.StoreInt64(&db.metrics.CompressionRatio, newRatio)
 }
 
 func (db *GojiDB) decompress(data []byte, ct CompressionType) ([]byte, error) {

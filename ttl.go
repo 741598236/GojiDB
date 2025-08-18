@@ -7,23 +7,25 @@ import (
 	"time"
 )
 
-// TTLManager TTL管理器
+// TTLManager 管理键的TTL过期时间
 type TTLManager struct {
-	expiryHeap    *ExpiryHeap
-	mu            sync.RWMutex
-	stopChan      chan struct{}
-	checkInterval time.Duration
-	cleanupFunc   func(key string)
+	expiryHeap    *ExpiryHeap           // 最小堆，存储按过期时间排序的键
+	mu            sync.RWMutex          // 读写锁，保护堆的并发访问
+	stopChan      chan struct{}         // 停止信号通道，用于优雅关闭
+	checkInterval time.Duration         // 检查间隔，控制清理频率
+	cleanupFunc   func(key string)      // 键过期时的清理函数，由调用者提供具体清理逻辑
 }
 
 // ExpiryItem 过期项
 type ExpiryItem struct {
-	key       string
-	expiresAt time.Time
-	index     int
+	key       string    // 键名，用于标识需要过期的键
+	expiresAt time.Time // 过期时间，决定键何时被清理
+	index     int       // 在堆中的索引位置，用于快速定位更新
 }
 
 // ExpiryHeap 过期时间堆
+// 实现了heap.Interface接口的最小堆，按过期时间升序排列
+// 堆顶元素是最早过期的键，便于快速判断和处理过期键
 type ExpiryHeap []*ExpiryItem
 
 func (h ExpiryHeap) Len() int           { return len(h) }
@@ -50,7 +52,7 @@ func (h *ExpiryHeap) Pop() interface{} {
 	return item
 }
 
-// NewTTLManager 创建新的TTL管理器
+// NewTTLManager 创建TTL管理器
 func NewTTLManager(cleanupFunc func(key string)) *TTLManager {
 	manager := &TTLManager{
 		expiryHeap:    &ExpiryHeap{},
@@ -72,21 +74,22 @@ func (tm *TTLManager) Add(key string, ttl time.Duration) {
 
 	expiresAt := time.Now().Add(ttl)
 
-	// 查找是否已存在
+	// 更新已存在的键
 	for _, item := range *tm.expiryHeap {
 		if item.key == key {
+			// 键已存在，更新过期时间并调整堆结构
 			item.expiresAt = expiresAt
-			heap.Fix(tm.expiryHeap, item.index)
+			heap.Fix(tm.expiryHeap, item.index) // 调整堆中元素位置
 			return
 		}
 	}
 
-	// 添加新项
+	// 键不存在，创建新的过期项并加入堆
 	item := &ExpiryItem{
 		key:       key,
 		expiresAt: expiresAt,
 	}
-	heap.Push(tm.expiryHeap, item)
+	heap.Push(tm.expiryHeap, item) // O(log n)时间复杂度
 }
 
 // Remove 移除TTL项
@@ -94,9 +97,10 @@ func (tm *TTLManager) Remove(key string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
+	// 线性搜索键对应的过期项
 	for _, item := range *tm.expiryHeap {
 		if item.key == key {
-			heap.Remove(tm.expiryHeap, item.index)
+			heap.Remove(tm.expiryHeap, item.index) // 从堆中移除
 			return
 		}
 	}

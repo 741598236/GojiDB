@@ -12,25 +12,27 @@ import (
 	"time"
 )
 
-// WAL操作类型
+// WALOpType 定义WAL操作类型
 type WALOpType byte
 
 const (
-	WALPut    WALOpType = 0x01
-	WALDelete WALOpType = 0x02
-	WALBegin  WALOpType = 0x03
-	WALCommit WALOpType = 0x04
-	WALRollback WALOpType = 0x05
+	WALPut    WALOpType = 0x01 // 写入操作
+	WALDelete WALOpType = 0x02 // 删除操作
+	WALBegin  WALOpType = 0x03 // 事务开始
+	WALCommit WALOpType = 0x04 // 事务提交
+	WALRollback WALOpType = 0x05 // 事务回滚
 )
 
-// WAL记录结构
+// WALRecord 表示单个WAL记录
+// 用于记录数据库操作的详细信息，支持崩溃恢复
+// 采用二进制格式存储，包含校验和确保数据完整性
 type WALRecord struct {
-	Type      WALOpType
-	Timestamp uint64
-	Key       string
-	Value     []byte
-	TxID      string
-	Checksum  uint32
+	Type      WALOpType // 操作类型
+	Timestamp uint64    // 操作时间戳（纳秒）
+	Key       string    // 操作的键
+	Value     []byte    // 操作的值（删除操作为空）
+	TxID      string    // 事务ID（事务操作时使用）
+	Checksum  uint32    // 数据校验和
 }
 
 // WALEntry WAL条目

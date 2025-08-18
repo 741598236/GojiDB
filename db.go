@@ -15,29 +15,33 @@ import (
 	"unicode/utf8"
 )
 
+// GojiDB 是数据库的核心结构体，包含所有数据库组件和状态
+// 采用读写锁保证并发安全，支持多线程访问
 type GojiDB struct {
-	config          *GojiDBConfig
-	keyDir          *ConcurrentMap
-	activeFile      *os.File
-	readFiles       map[uint32]*os.File
-	activeFileID    uint32
-	mu              sync.RWMutex
-	metrics         *Metrics
-	ttlTicker       *time.Ticker
-	stopChan        chan struct{}
-	ttlManager      *TTLManager
-	wg              sync.WaitGroup
-	blockCache      *BlockCache
-	keyCache        *KeyCache
-	smartCompressor *SmartCompressor
-	walManager      *WALManager
-	closed          bool
+	config          *GojiDBConfig       // 数据库配置信息
+	keyDir          *ConcurrentMap      // 内存中的键索引，存储键到文件位置的映射
+	activeFile      *os.File            // 当前活跃的写入文件
+	readFiles       map[uint32]*os.File // 只读文件句柄映射，用于读取历史数据
+	activeFileID    uint32              // 当前活跃文件的唯一标识符
+	mu              sync.RWMutex        // 读写锁，保护共享资源
+	metrics         *Metrics            // 性能指标收集器
+	ttlTicker       *time.Ticker        // TTL清理定时器
+	stopChan        chan struct{}       // 优雅关闭信号通道
+	ttlManager      *TTLManager         // TTL键管理器
+	wg              sync.WaitGroup      // 等待组，确保所有goroutine完成
+	blockCache      *BlockCache         // 块缓存，提高读取性能
+	keyCache        *KeyCache           // 键缓存，加速键查找
+	smartCompressor *SmartCompressor    // 智能压缩器
+	walManager      *WALManager         // 预写日志管理器
+	closed          bool                // 数据库关闭状态标志
 }
 
 func NewGojiDB(config *GojiDBConfig) (*GojiDB, error) {
+	// 确保数据目录存在
 	if err := os.MkdirAll(config.DataPath, 0755); err != nil {
 		return nil, fmt.Errorf("创建数据目录失败: %v", err)
 	}
+	// 确保快照目录存在
 	if err := os.MkdirAll(filepath.Join(config.DataPath, SnapshotDir), 0755); err != nil {
 		return nil, fmt.Errorf("创建快照目录失败: %v", err)
 	}
@@ -83,7 +87,7 @@ func NewGojiDB(config *GojiDBConfig) (*GojiDB, error) {
 	if config.SmartCompression != nil {
 		db.smartCompressor = NewSmartCompressor(config.SmartCompression)
 	}
-	
+
 	// 初始化WAL管理器
 	if config.EnableWAL {
 		wal, err := NewWALManager(config)
@@ -91,13 +95,13 @@ func NewGojiDB(config *GojiDBConfig) (*GojiDB, error) {
 			return nil, fmt.Errorf("初始化WAL管理器失败: %v", err)
 		}
 		db.walManager = wal
-		
+
 		// 执行崩溃恢复
 		if err := wal.Recover(db); err != nil {
 			return nil, fmt.Errorf("WAL恢复失败: %v", err)
 		}
 	}
-	
+
 	return db, nil
 }
 
@@ -122,7 +126,7 @@ func (db *GojiDB) Close() error {
 	if db.walManager != nil {
 		db.walManager.Close()
 	}
-	
+
 	if db.stopChan != nil {
 		close(db.stopChan)
 	}
@@ -378,6 +382,7 @@ func (db *GojiDB) BatchGet(keys []string) (map[string][]byte, error) {
 	return results, nil
 }
 
+// Get 根据键获取对应的值
 func (db *GojiDB) Get(key string) ([]byte, error) {
 	if key == "" {
 		return nil, fmt.Errorf("键不能为空")
@@ -386,27 +391,16 @@ func (db *GojiDB) Get(key string) ([]byte, error) {
 		atomic.AddInt64(&db.metrics.TotalReads, 1)
 	}
 
-	// 尝试从键缓存获取
+	// 尝试从键缓存获取并检查TTL
 	if cachedKeyDir, found := db.keyCache.GetKeyDir(key); found {
-		info := cachedKeyDir
-		now := uint32(time.Now().Unix())
-		if info.TTL > 0 && now >= info.TTL {
+		if db.checkCachedTTL(cachedKeyDir) {
 			go db.expireKey(key)
-			if db.config.EnableMetrics {
-				atomic.AddInt64(&db.metrics.ExpiredKeyCount, 1)
-			}
 			return nil, fmt.Errorf("键已过期")
 		}
 
 		// 尝试从块缓存获取数据
-		if cachedData, found := db.blockCache.GetBlock(info.FileID, info.ValuePos, info.ValueSize); found {
-			result, dErr := db.decompress(cachedData, info.Compression)
-			if dErr == nil {
-				if db.config.EnableMetrics {
-					atomic.AddInt64(&db.metrics.CacheHits, 1)
-				}
-				return result, nil
-			}
+		if data, ok := db.tryCacheRead(cachedKeyDir); ok {
+			return data, nil
 		}
 	}
 
@@ -424,89 +418,22 @@ func (db *GojiDB) Get(key string) ([]byte, error) {
 	// 更新键缓存
 	db.keyCache.SetKeyDir(key, info)
 
-	now := uint32(time.Now().Unix())
-	if info.TTL > 0 && now >= info.TTL {
+	if db.checkTTL(info) {
 		go db.expireKey(key)
-		if db.config.EnableMetrics {
-			atomic.AddInt64(&db.metrics.ExpiredKeyCount, 1)
-		}
 		return nil, fmt.Errorf("键已过期")
 	}
 
-	var data []byte
-	var err error
-
-	// 计算块对齐的读取位置
-	blockStart := (info.ValuePos / uint64(db.blockCache.blockSize)) * uint64(db.blockCache.blockSize)
-	blockEnd := blockStart + uint64(db.blockCache.blockSize)
-	if blockEnd > blockStart+uint64(info.ValueSize) {
-		blockEnd = blockStart + uint64(info.ValueSize)
-	}
-
-	// 尝试从块缓存获取
-	if cachedData, found := db.blockCache.GetBlock(info.FileID, blockStart, uint32(blockEnd-blockStart)); found {
-		// 计算在块内的偏移
-		offsetInBlock := info.ValuePos - blockStart
-		if offsetInBlock+uint64(info.ValueSize) <= uint64(len(cachedData)) {
-			data = cachedData[offsetInBlock : offsetInBlock+uint64(info.ValueSize)]
-		} else {
-			// 边界超出，直接从文件读取
-			data = make([]byte, info.ValueSize)
-			if info.FileID == db.activeFileID {
-				_, err = db.activeFile.ReadAt(data, int64(info.ValuePos))
-			} else {
-				filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", info.FileID))
-				f, openErr := os.Open(filename)
-				if openErr != nil {
-					return nil, openErr
-				}
-				defer f.Close()
-				_, err = f.ReadAt(data, int64(info.ValuePos))
-			}
-		}
-	} else {
-		// 从文件读取
-		if info.FileID == db.activeFileID {
-			data = make([]byte, info.ValueSize)
-			_, err = db.activeFile.ReadAt(data, int64(info.ValuePos))
-		} else {
-			filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", info.FileID))
-			f, openErr := os.Open(filename)
-			if openErr != nil {
-				atomic.AddInt64(&db.metrics.CacheMisses, 1)
-				return nil, openErr
-			}
-			defer f.Close()
-			data = make([]byte, info.ValueSize)
-			_, err = f.ReadAt(data, int64(info.ValuePos))
-		}
-
-		// 更新块缓存
-		if err == nil {
-			blockData := make([]byte, db.blockCache.blockSize)
-			if info.FileID == db.activeFileID {
-				_, _ = db.activeFile.ReadAt(blockData, int64(blockStart))
-			} else {
-				filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", info.FileID))
-				f, _ := os.Open(filename)
-				if f != nil {
-					defer f.Close()
-					_, _ = f.ReadAt(blockData, int64(blockStart))
-				}
-			}
-			db.blockCache.SetBlock(info.FileID, blockStart, blockData)
-		}
-	}
-
+	data, err := db.readData(info)
 	if err != nil {
-		atomic.AddInt64(&db.metrics.CacheMisses, 1)
 		return nil, err
 	}
 
-	result, dErr := db.decompress(data, info.Compression)
-	if dErr != nil {
-		atomic.AddInt64(&db.metrics.CacheMisses, 1)
-		return nil, dErr
+	result, err := db.decompress(data, info.Compression)
+	if err != nil {
+		if db.config.EnableMetrics {
+			atomic.AddInt64(&db.metrics.CacheMisses, 1)
+		}
+		return nil, err
 	}
 
 	if db.config.EnableMetrics {
@@ -515,6 +442,7 @@ func (db *GojiDB) Get(key string) ([]byte, error) {
 	return result, nil
 }
 
+// Delete 删除指定的键及其对应的值
 func (db *GojiDB) Delete(key string) error {
 	if key == "" {
 		return fmt.Errorf("键不能为空")
@@ -588,6 +516,7 @@ func (db *GojiDB) Delete(key string) error {
 	return nil
 }
 
+// ListKeys 返回所有未过期的键列表
 func (db *GojiDB) ListKeys() []string {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -637,6 +566,15 @@ func (db *GojiDB) GetTTL(key string) (time.Duration, error) {
 
 // ======== 内部实现 ========
 
+// expireKey 异步删除过期键
+func (db *GojiDB) expireKey(key string) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if info, ok := db.keyDir.Get(key); ok && !info.Deleted {
+		_ = db.deleteInternal(key)
+	}
+}
+
 func (db *GojiDB) startTTLCleanup() {
 	db.ttlTicker = time.NewTicker(db.config.TTLCheckInterval)
 	db.wg.Add(1)
@@ -672,12 +610,123 @@ func (db *GojiDB) cleanupExpiredKeys() {
 	}
 }
 
-func (db *GojiDB) expireKey(key string) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if info, ok := db.keyDir.Get(key); ok && !info.Deleted {
-		_ = db.deleteInternal(key)
+// checkCachedTTL 检查缓存中的键是否过期
+func (db *GojiDB) checkCachedTTL(info *KeyDir) bool {
+	if info.TTL == 0 {
+		return false
 	}
+	
+	now := uint32(time.Now().Unix())
+	expired := now >= info.TTL
+	
+	if expired && db.config.EnableMetrics {
+		atomic.AddInt64(&db.metrics.ExpiredKeyCount, 1)
+	}
+	
+	return expired
+}
+
+// checkTTL 检查键是否过期
+func (db *GojiDB) checkTTL(info *KeyDir) bool {
+	if info.TTL == 0 {
+		return false
+	}
+	
+	now := uint32(time.Now().Unix())
+	expired := now >= info.TTL
+	
+	if expired && db.config.EnableMetrics {
+		atomic.AddInt64(&db.metrics.ExpiredKeyCount, 1)
+	}
+	
+	return expired
+}
+
+// tryCacheRead 尝试从缓存直接读取数据
+func (db *GojiDB) tryCacheRead(info *KeyDir) ([]byte, bool) {
+	if cachedData, found := db.blockCache.GetBlock(info.FileID, info.ValuePos, info.ValueSize); found {
+		result, err := db.decompress(cachedData, info.Compression)
+		if err == nil {
+			if db.config.EnableMetrics {
+				atomic.AddInt64(&db.metrics.CacheHits, 1)
+			}
+			return result, true
+		}
+	}
+	return nil, false
+}
+
+// readData 读取键对应的数据
+func (db *GojiDB) readData(info *KeyDir) ([]byte, error) {
+	// 计算块对齐的读取位置
+	blockStart := (info.ValuePos / uint64(db.blockCache.blockSize)) * uint64(db.blockCache.blockSize)
+	
+	// 尝试从块缓存获取
+	if cachedData, found := db.blockCache.GetBlock(info.FileID, blockStart, uint32(db.blockCache.blockSize)); found {
+		data := db.extractDataFromBlock(cachedData, info, blockStart)
+		if data != nil {
+			return data, nil
+		}
+	}
+
+	// 从文件读取
+	return db.readFromFileAndCache(info, blockStart)
+}
+
+// extractDataFromBlock 从块缓存中提取数据
+func (db *GojiDB) extractDataFromBlock(blockData []byte, info *KeyDir, blockStart uint64) []byte {
+	offsetInBlock := info.ValuePos - blockStart
+	if offsetInBlock+uint64(info.ValueSize) <= uint64(len(blockData)) {
+		data := make([]byte, info.ValueSize)
+		copy(data, blockData[offsetInBlock:offsetInBlock+uint64(info.ValueSize)])
+		return data
+	}
+	return nil
+}
+
+// readFromFileAndCache 从文件读取数据并更新缓存
+func (db *GojiDB) readFromFileAndCache(info *KeyDir, blockStart uint64) ([]byte, error) {
+	data := make([]byte, info.ValueSize)
+	
+	// 读取实际数据
+	var err error
+	if info.FileID == db.activeFileID {
+		_, err = db.activeFile.ReadAt(data, int64(info.ValuePos))
+	} else {
+		filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", info.FileID))
+		f, openErr := os.Open(filename)
+		if openErr != nil {
+			return nil, openErr
+		}
+		defer f.Close()
+		_, err = f.ReadAt(data, int64(info.ValuePos))
+	}
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	// 更新块缓存
+	db.updateBlockCache(info, blockStart)
+	
+	return data, nil
+}
+
+// updateBlockCache 更新块缓存
+func (db *GojiDB) updateBlockCache(info *KeyDir, blockStart uint64) {
+	blockData := make([]byte, db.blockCache.blockSize)
+	
+	if info.FileID == db.activeFileID {
+		_, _ = db.activeFile.ReadAt(blockData, int64(blockStart))
+	} else {
+		filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", info.FileID))
+		if f, err := os.Open(filename); err == nil {
+			defer f.Close()
+			_, _ = f.ReadAt(blockData, int64(blockStart))
+		}
+	}
+	
+	db.blockCache.SetBlock(info.FileID, blockStart, blockData)
 }
 
 func (db *GojiDB) rebuildKeyDir() error {
@@ -1532,7 +1581,7 @@ func (db *GojiDB) GetMetrics() *Metrics {
 	}
 
 	keyCount := int64(db.keyDir.Size())
-	
+
 	// 计算数据总大小
 	var dataSize int64
 	files, _ := filepath.Glob(filepath.Join(db.config.DataPath, "*.data"))

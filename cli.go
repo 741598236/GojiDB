@@ -57,101 +57,154 @@ const (
 	BoxCross       = "┼"
 )
 
+// 命令处理器类型定义
+type commandHandler func(*GojiDB, []string) error
+
+// commandRegistry 全局命令注册表
+var commandRegistry = map[string]commandHandler{
+	"help":        handleHelp,
+	"h":           handleHelp,
+	"?":           handleHelp,
+	"put":         handlePut,
+	"set":         handlePut,
+	"get":         handleGet,
+	"delete":      handleDelete,
+	"del":         handleDelete,
+	"rm":          handleDelete,
+	"list":        handleList,
+	"ls":          handleList,
+	"ttl":         handleTTL,
+	"snapshot":    handleSnapshot,
+	"snap":        handleSnapshot,
+	"stats":       handleStats,
+	"status":      handleStats,
+	"compact":     handleCompact,
+	"clear":       handleClear,
+	"info":        handleInfo,
+	"history":     handleHistory,
+	"batch":       handleBatch,
+	"export":      handleExport,
+	"transaction": handleTransaction,
+	"tx":          handleTransaction,
+	"snapshots":   handleSnapshots,
+	"restore":     handleRestore,
+	"health":      handleHealth,
+	"search":      handleSearch,
+	"import":      handleImport,
+	"benchmark":   handleBenchmark,
+	"monitor":     handleMonitor,
+	"wal":         handleWAL,
+	"exit":        handleExit,
+	"quit":        handleExit,
+	"q":           handleExit,
+}
+
+// StartInteractiveMode 简化的交互模式启动器
 func (db *GojiDB) StartInteractiveMode() {
 	printWelcome()
-	scanner := bufio.NewScanner(os.Stdin)
+	
+	cli := newInteractiveCLI(db)
+	cli.run()
+}
 
-	// 添加命令历史记录
-	var history []string
-	historyFile := "../logs/gojidb_history.json"
+// interactiveCLI 封装交互式CLI的状态和行为
+type interactiveCLI struct {
+	db       *GojiDB
+	scanner  *bufio.Scanner
+	history  *commandHistory
+}
 
-	// 确保logs目录存在
-	os.MkdirAll("../logs", 0755)
-
-	// 加载历史记录
-	if data, err := os.ReadFile(historyFile); err == nil {
-		json.Unmarshal(data, &history)
+// newInteractiveCLI 创建新的交互式CLI实例
+func newInteractiveCLI(db *GojiDB) *interactiveCLI {
+	return &interactiveCLI{
+		db:      db,
+		scanner: bufio.NewScanner(os.Stdin),
+		history: newCommandHistory(),
 	}
+}
 
+// run 运行主交互循环
+func (cli *interactiveCLI) run() {
+	defer cli.history.save()
+	
 	for {
-		fmt.Printf("%s%s🍒 %s%s %s[%s]%s %s❯%s ", CliBold, CliCyan, DBName, CliReset, CliGray, time.Now().Format("15:04:05"), CliReset, CliPurple, CliReset)
+		fmt.Printf("%s%s🍒 %s%s %s[%s]%s %s❯%s ", 
+			CliBold, CliCyan, DBName, CliReset, 
+			CliGray, time.Now().Format("15:04:05"), CliReset, 
+			CliPurple, CliReset)
 
-		if !scanner.Scan() {
+		if !cli.scanner.Scan() {
 			break
 		}
 
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(cli.scanner.Text())
 		if line == "" {
 			continue
 		}
 
-		// 保存到历史记录
-		if line != "exit" && line != "quit" && line != "q" {
-			history = append(history, line)
-			if len(history) > 100 {
-				history = history[len(history)-100:]
+		if err := cli.executeCommand(line); err != nil {
+			if err == errExitCLI {
+				return
 			}
-			if data, err := json.MarshalIndent(history, "", "  "); err == nil {
-				os.WriteFile(historyFile, data, 0644)
-			}
+			fmt.Printf("%s❌ 错误: %v%s\n", CliRed, err, CliReset)
 		}
+	}
+}
 
-		parts := strings.Fields(line)
-		cmd := strings.ToLower(parts[0])
+// executeCommand 执行单个命令
+func (cli *interactiveCLI) executeCommand(line string) error {
+	parts := strings.Fields(line)
+	if len(parts) == 0 {
+		return nil
+	}
 
-		switch cmd {
-		case "help", "h", "?":
-			db.showHelp()
-		case "put", "set":
-			db.handlePut(parts)
-		case "get":
-			db.handleGet(parts)
-		case "delete", "del", "rm":
-			db.handleDelete(parts)
-		case "list", "ls":
-			db.handleList(parts)
-		case "ttl":
-			db.handleTTL(parts)
-		case "snapshot", "snap":
-			db.handleSnapshot(parts)
-		case "stats", "status":
-			db.handleStats()
-		case "compact":
-			db.handleCompact()
-		case "clear":
-			db.handleClear()
-		case "info":
-			db.handleInfo()
-		case "history":
-			db.handleHistory(history)
-		case "batch":
-			db.handleBatch()
-		case "export":
-			db.handleExport()
-		case "transaction", "tx":
-			db.handleTransaction()
-		case "snapshots":
-			db.handleSnapshots()
-		case "restore":
-			db.handleRestore(parts)
-		case "health":
-			db.handleHealth()
-		case "search":
-			db.handleSearch(parts)
-		case "import":
-			db.handleImport(parts)
-		case "benchmark":
-			db.handleBenchmark(parts)
-		case "monitor":
-			db.handleMonitor()
-		case "wal":
-			db.handleWAL(parts)
-		case "exit", "quit", "q":
-			fmt.Printf("%s👋 再见！感谢使用 GojiDB%s\n", CliGreen, CliReset)
-			return
-		default:
-			fmt.Printf("%s❌ 未知命令 '%s'，输入 'help' 查看可用命令%s\n", CliRed, cmd, CliReset)
-		}
+	cmd := strings.ToLower(parts[0])
+	
+	// 保存到历史记录（排除退出命令）
+	if cmd != "exit" && cmd != "quit" && cmd != "q" {
+		cli.history.add(line)
+	}
+
+	// 查找并执行命令处理器
+	if handler, exists := commandRegistry[cmd]; exists {
+		return handler(cli.db, parts)
+	}
+
+	return fmt.Errorf("未知命令: %s (输入 'help' 获取帮助)", cmd)
+}
+
+// commandHistory 命令历史管理器
+type commandHistory struct {
+	entries []string
+	file    string
+}
+
+func newCommandHistory() *commandHistory {
+	h := &commandHistory{
+		entries: make([]string, 0, 100),
+		file:    "../logs/gojidb_history.json",
+	}
+	os.MkdirAll("../logs", 0755)
+	h.load()
+	return h
+}
+
+func (h *commandHistory) add(cmd string) {
+	h.entries = append(h.entries, cmd)
+	if len(h.entries) > 100 {
+		h.entries = h.entries[len(h.entries)-100:]
+	}
+}
+
+func (h *commandHistory) load() {
+	if data, err := os.ReadFile(h.file); err == nil {
+		json.Unmarshal(data, &h.entries)
+	}
+}
+
+func (h *commandHistory) save() {
+	if data, err := json.MarshalIndent(h.entries, "", "  "); err == nil {
+		os.WriteFile(h.file, data, 0644)
 	}
 }
 
@@ -1657,3 +1710,280 @@ func showLoadingAnimation(msg string, d time.Duration) {
 	}
 	fmt.Printf("\r%s✅ %s 完成%s\n", ColorGreen, msg, ColorReset)
 }
+
+// 独立命令处理器函数
+func handleHelp(db *GojiDB, parts []string) error {
+	db.showHelp()
+	return nil
+}
+
+func handlePut(db *GojiDB, parts []string) error {
+	if len(parts) < 3 {
+		return fmt.Errorf("用法: put <key> <value> [ttl]")
+	}
+	
+	key, value := parts[1], strings.Join(parts[2:], " ")
+	value = strings.Trim(value, `"'`)
+	
+	if len(parts) > 3 {
+		if ttl, err := time.ParseDuration(parts[3]); err == nil {
+			return db.PutWithTTL(key, []byte(value), ttl)
+		}
+	}
+	
+	return db.Put(key, []byte(value))
+}
+
+func handleGet(db *GojiDB, parts []string) error {
+	if len(parts) < 2 {
+		return fmt.Errorf("用法: get <key>")
+	}
+	
+	value, err := db.Get(parts[1])
+	if err != nil {
+		return err
+	}
+	
+	fmt.Printf("%s%s%s = %s%s%s\n", 
+		CliGreen, parts[1], CliReset, 
+		CliYellow, string(value), CliReset)
+	return nil
+}
+
+func handleDelete(db *GojiDB, parts []string) error {
+	if len(parts) < 2 {
+		return fmt.Errorf("用法: delete <key>")
+	}
+	return db.Delete(parts[1])
+}
+
+func handleList(db *GojiDB, parts []string) error {
+	pattern := ""
+	if len(parts) > 1 {
+		pattern = parts[1]
+	}
+	
+	keys := db.ListKeys()
+	filtered := filterKeys(keys, pattern)
+	
+	fmt.Printf("%s找到 %d 个键:%s\n", CliCyan, len(filtered), CliReset)
+	for i, key := range filtered {
+		fmt.Printf("  %s%d.%s %s%s%s\n", CliGray, i+1, CliReset, CliGreen, key, CliReset)
+	}
+	return nil
+}
+
+func handleTTL(db *GojiDB, parts []string) error {
+	if len(parts) < 2 {
+		return fmt.Errorf("用法: ttl <key>")
+	}
+	
+	ttl, err := db.GetTTL(parts[1])
+	if err != nil {
+		return err
+	}
+	
+	if ttl > 0 {
+		fmt.Printf("%s%s%s TTL: %s%s%s\n", 
+			CliYellow, parts[1], CliReset, 
+			CliGreen, ttl.Round(time.Second), CliReset)
+	} else {
+		fmt.Printf("%s%s%s 没有TTL或已过期%s\n", 
+			CliRed, parts[1], CliReset, CliReset)
+	}
+	return nil
+}
+
+func handleCompact(db *GojiDB, parts []string) error {
+	fmt.Printf("%s🧹 开始数据合并...%s\n", CliCyan, CliReset)
+	if err := db.Compact(); err != nil {
+		return err
+	}
+	fmt.Printf("%s✅ 数据合并完成%s\n", CliGreen, CliReset)
+	return nil
+}
+
+func handleClear(db *GojiDB, parts []string) error {
+	fmt.Printf("%s🗑️  清空屏幕...%s\n", CliYellow, CliReset)
+	db.handleClear()
+	return nil
+}
+
+func handleStats(db *GojiDB, parts []string) error {
+	db.handleStats()
+	return nil
+}
+
+func handleInfo(db *GojiDB, parts []string) error {
+	db.handleInfo()
+	return nil
+}
+
+func handleHistory(db *GojiDB, parts []string) error {
+	return fmt.Errorf("history命令已集成到CLI中，无需单独调用")
+}
+
+func handleBatch(db *GojiDB, parts []string) error {
+	db.handleBatch()
+	return nil
+}
+
+func handleExport(db *GojiDB, parts []string) error {
+	db.handleExport()
+	return nil
+}
+
+func handleSnapshots(db *GojiDB, parts []string) error {
+	db.handleSnapshots()
+	return nil
+}
+
+func handleRestore(db *GojiDB, parts []string) error {
+	if len(parts) < 2 {
+		return fmt.Errorf("用法: restore <backup_path>")
+	}
+	db.handleRestore(parts)
+	return nil
+}
+
+func handleHealth(db *GojiDB, parts []string) error {
+	db.handleHealth()
+	return nil
+}
+
+func handleSearch(db *GojiDB, parts []string) error {
+	if len(parts) < 2 {
+		return fmt.Errorf("用法: search <pattern>")
+	}
+	
+	pattern := parts[1]
+	keys := db.ListKeys()
+	var results []string
+	
+	for _, key := range keys {
+		if strings.Contains(key, pattern) {
+			results = append(results, key)
+		}
+	}
+	
+	fmt.Printf("%s找到 %d 个匹配结果:%s\n", CliCyan, len(results), CliReset)
+	for i, key := range results {
+		if value, err := db.Get(key); err == nil {
+			fmt.Printf("  %s%d.%s %s%s%s = %s%s...%s\n", 
+				CliGray, i+1, CliReset, 
+				CliGreen, key, CliReset, 
+				CliYellow, truncateString(string(value), 50), CliReset)
+		}
+	}
+	return nil
+}
+
+func handleImport(db *GojiDB, parts []string) error {
+	if len(parts) < 2 {
+		return fmt.Errorf("用法: import <file_path>")
+	}
+	db.handleImport(parts)
+	return nil
+}
+
+func handleBenchmark(db *GojiDB, parts []string) error {
+	fmt.Printf("%s🏃 运行快速基准测试...%s\n", CliCyan, CliReset)
+	
+	start := time.Now()
+	count := 1000
+	for i := 0; i < count; i++ {
+		key := fmt.Sprintf("bench:%d", i)
+		value := fmt.Sprintf("value-%d", i)
+		if err := db.Put(key, []byte(value)); err != nil {
+			return err
+		}
+	}
+	
+	duration := time.Since(start)
+	qps := float64(count) / duration.Seconds()
+	
+	fmt.Printf("%s✅ 基准测试完成: %d 次操作, %.2f ops/sec, 耗时 %v%s\n", 
+		CliGreen, count, qps, duration, CliReset)
+	return nil
+}
+
+func handleMonitor(db *GojiDB, parts []string) error {
+	db.handleMonitor()
+	return nil
+}
+
+func handleTransaction(db *GojiDB, parts []string) error {
+	db.handleTransaction()
+	return nil
+}
+
+func handleSnapshot(db *GojiDB, parts []string) error {
+	if len(parts) > 1 {
+		cmd := strings.ToLower(parts[1])
+		switch cmd {
+		case "create":
+			id, err := db.CreateSnapshot()
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%s✅ 快照已创建: %s%s\n", CliGreen, id.ID, CliReset)
+		case "list":
+			snapshots, err := db.ListSnapshots()
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%s找到 %d 个快照:%s\n", CliCyan, len(snapshots), CliReset)
+			for _, snapshot := range snapshots {
+				fmt.Printf("  %s%s%s\n", CliBlue, snapshot.ID, CliReset)
+			}
+		case "restore":
+			if len(parts) < 3 {
+				return fmt.Errorf("用法: snapshot restore <id>")
+			}
+			return db.RestoreFromSnapshot(parts[2])
+		default:
+			return fmt.Errorf("未知快照命令: %s", cmd)
+		}
+	} else {
+		id, err := db.CreateSnapshot()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s✅ 快照已创建: %s%s\n", CliGreen, id.ID, CliReset)
+	}
+	return nil
+}
+
+func handleWAL(db *GojiDB, parts []string) error {
+	db.handleWAL(parts)
+	return nil
+}
+
+func handleExit(db *GojiDB, parts []string) error {
+	fmt.Printf("%s👋 再见！感谢使用 GojiDB%s\n", CliGreen, CliReset)
+	return errExitCLI
+}
+
+// 辅助函数
+func filterKeys(keys []string, pattern string) []string {
+	if pattern == "" {
+		return keys
+	}
+	
+	var filtered []string
+	for _, key := range keys {
+		if strings.Contains(key, pattern) {
+			filtered = append(filtered, key)
+		}
+	}
+	return filtered
+}
+
+func truncateString(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+var errExitCLI = fmt.Errorf("exit CLI")

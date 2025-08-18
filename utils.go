@@ -6,6 +6,8 @@ import (
 	"runtime"
 )
 
+// getSystemDetails 收集系统运行时信息
+// 用于诊断和性能分析，返回格式化的系统状态数据
 func getSystemDetails() map[string]string {
 	details := make(map[string]string)
 	details["os"] = getOSName()

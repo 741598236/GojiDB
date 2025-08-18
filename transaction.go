@@ -8,19 +8,25 @@ import (
 	"time"
 )
 
+// Transaction 表示一个数据库事务
+// 提供原子性操作，支持回滚和提交
 type Transaction struct {
-	id         string
-	operations []TransactionOp
-	db         *GojiDB
-	mu         sync.Mutex
+	id         string           // 事务唯一标识符
+	operations []TransactionOp  // 事务操作列表
+	db         *GojiDB          // 关联的数据库实例
+	mu         sync.Mutex       // 事务操作互斥锁
 }
 
+// TransactionOp 表示单个事务操作
+// 用于记录事务中的每个操作步骤
 type TransactionOp struct {
-	Type  string
-	Key   string
-	Value []byte
+	Type  string // 操作类型: "PUT" 或 "DELETE"
+	Key   string // 操作的键
+	Value []byte // 操作的值（DELETE操作时为nil）
 }
 
+// BeginTransaction 开始一个新的事务
+// 返回一个可用于执行事务操作的事务对象
 func (db *GojiDB) BeginTransaction() (*Transaction, error) {
 	b := make([]byte, 8)
 	rand.Read(b)
