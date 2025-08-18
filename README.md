@@ -4,6 +4,8 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](https://github.com/741598236/GojiDB/actions)
 
+[📖 English README](README_EN.md) | [📚 中文文档](README.md)
+
 **GojiDB** 是一个高性能、轻量级的键值数据库，专为现代应用程序设计。基于 LSM 树架构，支持 WAL 预写日志、TTL 过期管理、智能压缩算法和企业级特性。最新版本修复了 WAL 稳定性问题，提供生产级可靠性。
 
 ### Go模块使用
