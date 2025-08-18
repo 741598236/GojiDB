@@ -1,4 +1,4 @@
-package main
+package gojidb
 
 import (
 	"container/heap"

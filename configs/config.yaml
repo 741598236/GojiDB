@@ -1,6 +1,6 @@
 app:
     name: GojiDB
-    version: 2.1.0
+    version: 1.0.0
     description: 高性能键值存储数据库
 database:
     data_dir: ../data
