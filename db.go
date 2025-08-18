@@ -356,9 +356,9 @@ func (db *GojiDB) BatchGet(keys []string) (map[string][]byte, error) {
 				results[key] = []byte{}
 				continue
 			}
-			defer f.Close()
 			data = make([]byte, info.ValueSize)
 			_, err = f.ReadAt(data, int64(info.ValuePos))
+			f.Close() // 立即关闭文件，避免defer延迟
 		}
 
 		if err == nil {
@@ -721,8 +721,8 @@ func (db *GojiDB) updateBlockCache(info *KeyDir, blockStart uint64) {
 	} else {
 		filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", info.FileID))
 		if f, err := os.Open(filename); err == nil {
-			defer f.Close()
 			_, _ = f.ReadAt(blockData, int64(blockStart))
+			f.Close() // 立即关闭文件
 		}
 	}
 	
@@ -856,6 +856,11 @@ func (db *GojiDB) rotateActiveFile() error {
 		readFile, err := os.Open(filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", db.activeFileID)))
 		if err == nil {
 			db.readFiles[db.activeFileID] = readFile
+		} else {
+			// 如果打开失败，确保关闭文件句柄
+			if readFile != nil {
+				readFile.Close()
+			}
 		}
 	}
 	db.activeFileID++
