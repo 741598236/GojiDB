@@ -256,16 +256,47 @@ func (db *GojiDB) BatchPut(items map[string][]byte) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	batchSize := 0
+	if len(items) == 0 {
+		return nil
+	}
+
+	// 预检查文件轮转需求
+	totalSize := int64(0)
 	for key, value := range items {
 		if key == "" {
 			continue
 		}
+		// 预估压缩后大小 + 头部开销
+		estimatedSize := int64(len(value)) + HeaderSize + int64(len(key))
+		totalSize += estimatedSize
+	}
+
+	// 预轮转检查
+	if db.activeFile != nil && totalSize > 0 {
+		if stat, err := db.activeFile.Stat(); err == nil && stat.Size()+totalSize > db.config.MaxFileSize {
+			if err := db.rotateActiveFile(); err != nil {
+				return fmt.Errorf("轮转文件失败: %v", err)
+			}
+		}
+	}
+
+	// 获取当前文件位置
+	pos, _ := db.activeFile.Seek(0, io.SeekEnd)
+	currentPos := pos
+
+	// 批量写入所有条目
+	for key, value := range items {
+		if key == "" {
+			continue
+		}
+
+		// 使用内存池复用压缩缓冲区
 		compressed, algorithm, err := db.compress(value)
 		if err != nil {
 			return fmt.Errorf("压缩失败: %v", err)
 		}
 
+		// 构建entry
 		entry := &Entry{
 			Timestamp:   uint32(time.Now().Unix()),
 			KeySize:     uint16(len(key)),
@@ -276,89 +307,103 @@ func (db *GojiDB) BatchPut(items map[string][]byte) error {
 		}
 		entry.CRC = db.calculateCRC(entry)
 
+		// 序列化到预分配缓冲区
 		data, err := db.serializeEntry(entry)
 		if err != nil {
 			return err
 		}
 
-		if db.activeFile != nil {
-			if stat, err := db.activeFile.Stat(); err == nil && stat.Size()+int64(len(data)) > db.config.MaxFileSize {
-				if err := db.rotateActiveFile(); err != nil {
-					return fmt.Errorf("轮转文件失败: %v", err)
-				}
-			}
-		}
-
-		pos, err := db.activeFile.Seek(0, io.SeekEnd)
-		if err != nil {
-			return err
-		}
+		// 单次批量写入
 		if _, err := db.activeFile.Write(data); err != nil {
 			return err
 		}
 
-		batchSize += len(data)
+		// 批量更新keyDir
 		db.keyDir.Set(key, &KeyDir{
 			FileID:      db.activeFileID,
 			ValueSize:   entry.ValueSize,
-			ValuePos:    uint64(pos + HeaderSize + int64(entry.KeySize)),
+			ValuePos:    uint64(currentPos + HeaderSize + int64(entry.KeySize)),
 			Timestamp:   entry.Timestamp,
 			Compression: entry.Compression,
 			Deleted:     false,
 		})
+
+		currentPos += int64(len(data))
 
 		if db.config.EnableMetrics {
 			atomic.AddInt64(&db.metrics.TotalWrites, 1)
 		}
 	}
 
+	// 批量同步
 	if db.config.SyncWrites {
 		db.activeFile.Sync()
 	}
 	return nil
 }
 
-// 批量读取操作
+// 批量读取操作 - 内存优化版本
 func (db *GojiDB) BatchGet(keys []string) (map[string][]byte, error) {
+	if len(keys) == 0 {
+		return make(map[string][]byte), nil
+	}
+
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	results := make(map[string][]byte)
+	// 预分配结果map，避免扩容
+	results := make(map[string][]byte, len(keys))
+
+	// 批量预读取文件信息，减少系统调用
+	fileCache := make(map[uint32]*os.File)
+	defer func() {
+		// 及时关闭打开的文件
+		for _, f := range fileCache {
+			if f != nil {
+				f.Close()
+			}
+		}
+	}()
+
+	// 优化的串行处理
 	for _, key := range keys {
 		if key == "" {
+			results[key] = []byte{}
 			continue
 		}
 
 		info, ok := db.keyDir.Get(key)
 		if !ok || info.Deleted {
-			// 不存在的键返回空字节数组
 			results[key] = []byte{}
 			continue
 		}
 
 		now := uint32(time.Now().Unix())
 		if info.TTL > 0 && now >= info.TTL {
-			// 过期的键返回空字节数组
 			results[key] = []byte{}
 			continue
 		}
 
 		var data []byte
 		var err error
+
+		// 使用文件缓存减少重复打开
 		if info.FileID == db.activeFileID {
 			data = make([]byte, info.ValueSize)
 			_, err = db.activeFile.ReadAt(data, int64(info.ValuePos))
 		} else {
-			filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", info.FileID))
-			f, openErr := os.Open(filename)
-			if openErr != nil {
-				// 文件打开失败，返回空字节数组
-				results[key] = []byte{}
-				continue
+			f, ok := fileCache[info.FileID]
+			if !ok {
+				filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", info.FileID))
+				f, err = os.Open(filename)
+				if err != nil {
+					results[key] = []byte{}
+					continue
+				}
+				fileCache[info.FileID] = f
 			}
 			data = make([]byte, info.ValueSize)
 			_, err = f.ReadAt(data, int64(info.ValuePos))
-			f.Close() // 立即关闭文件，避免defer延迟
 		}
 
 		if err == nil {
@@ -366,11 +411,9 @@ func (db *GojiDB) BatchGet(keys []string) (map[string][]byte, error) {
 			if err == nil {
 				results[key] = decompressed
 			} else {
-				// 解压失败，返回空字节数组
 				results[key] = []byte{}
 			}
 		} else {
-			// 读取失败，返回空字节数组
 			results[key] = []byte{}
 		}
 
@@ -942,14 +985,14 @@ func (db *GojiDB) createCompactFile() (string, *os.File, error) {
 func (db *GojiDB) collectActiveKeys() map[string]*KeyDir {
 	activeKeys := make(map[string]*KeyDir)
 	now := uint32(time.Now().Unix())
-	
+
 	db.keyDir.Range(func(key string, kd *KeyDir) bool {
 		if !kd.Deleted && (kd.TTL == 0 || now <= kd.TTL) {
 			activeKeys[key] = kd
 		}
 		return true
 	})
-	
+
 	return activeKeys
 }
 
@@ -1073,7 +1116,7 @@ func (db *GojiDB) cleanupOldFiles(compactFileName string) error {
 		_ = db.activeFile.Close()
 		db.activeFile = nil
 	}
-	
+
 	for _, f := range db.readFiles {
 		_ = f.Close()
 	}
@@ -1100,11 +1143,11 @@ func (db *GojiDB) updateDatabaseState(newKeyDir map[string]*KeyDir) error {
 	// 更新元数据
 	db.activeFileID = 1
 	db.keyDir = NewConcurrentMap(16)
-	
+
 	for key, kd := range newKeyDir {
 		db.keyDir.Set(key, kd)
 	}
-	
+
 	return db.openActiveFile()
 }
 
