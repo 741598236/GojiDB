@@ -130,74 +130,65 @@ We have completed comprehensive performance benchmark testing. All tests passed 
 
 #### 🚀 Core Performance Metrics
 
-| Operation Type | Performance(ops/sec) | Latency(ns/op) | Performance Rating |
-|----------------|----------------------|----------------|------------------|
-| **Read(Get)** | 2,154,236 | 464.0 ns | 🟢 Excellent |
-| **Write(Put)** | 122,264 | 8,178 ns | 🟢 Excellent |
-| **Delete** | 470,362 | 2,599 ns | 🟢 Excellent |
-| **Exists Check** | 2,244,022 | 445.8 ns | 🟢 Excellent |
+| Operation Type | Performance(ops/sec) | Latency(ns/op) | Memory Usage(B/op) | Performance Rating |
+|----------------|----------------------|----------------|--------------------|------------------|
+| **Write(Put)** | 115,267 | 8,671 ns | 634 B | 🟢 Excellent |
+| **Read(Get)** | 2,147,720 | 466.3 ns | 258 B | 🟢 Excellent |
+| **Delete** | 356,517 | 2,805 ns | 248 B | 🟢 Excellent |
+| **PutWithTTL** | 143,658 | 8,707 ns | 632 B | 🟢 Excellent |
 
-#### 🔥 Concurrent Performance Highlights
+### 📦 Batch Operations Performance
 
-| Test Scenario | Performance(ops/sec) | Latency(ns/op) | Concurrency Efficiency |
-|---------------|----------------------|----------------|----------------------|
-| **Concurrent Writes** | 108,502 | 10,106 ns | 🟢 High |
-| **Concurrent Transaction Isolation** | 4,615 | 216,026 ns | 🟢 High |
-| **Read-Write Contention** | 68,386 | 14,637 ns | 🟢 High |
-| **Concurrent Batch Operations** | 1,801 | 545,126 ns | 🟢 Medium |
-| **Lock Contention** | 67,692 | 14,819 ns | 🟢 High |
-| **Concurrent TTL** | 101,009 | 9,907 ns | 🟢 High |
+| Batch Operation Type | Performance(ops/sec) | Latency(ns/op) | Memory Usage(B/op) | Performance Rating |
+|----------------------|----------------------|----------------|--------------------|------------------|
+| **Batch Write(100 items)** | 2,805 | 359,575 ns | 37,421 B | 🟡 Medium |
+| **Batch Read(1000 items)** | 377 | 2,646,712 ns | 114,436 B | 🟡 Needs Optimization |
 
-#### 🗄️ Storage Optimization Performance
+### 🔥 Concurrent Performance Highlights 
 
-| Compression Test | Performance(ops/sec) | Latency(ns/op) | Compression Efficiency |
-|------------------|----------------------|----------------|----------------------|
-| **No Compression** | 110,245 | 9,072 ns | 🟢 Standard |
-| **Snappy Compression** | 108,502 | 10,106 ns | 🟢 Good |
-| **Gzip Compression** | 95,167 | 12,543 ns | 🟡 Medium |
-| **ZSTD Compression** | 87,234 | 11,459 ns | 🟡 Medium |
-| **File Rotation** | 9,756 | 102,491 ns | 🟡 Medium |
-| **Compression Recovery** | 4,627 | 215,533 ns | 🟡 Slow |
-| **Mixed Compression** | 98,743 | 10,133 ns | 🟢 Good |
+| Concurrent Test Type | Performance(ops/sec) | Latency(ns/op) | Memory Usage(B/op) | Concurrency Rating |
+|----------------------|----------------------|----------------|--------------------|------------------|
+| **Concurrent Writes** | 83,122 | 12,022 ns | 630 B | 🟢 High |
+| **Concurrent Reads** | 497,317 | 2,557 ns | 1,325 B | 🟢 Excellent |
 
-#### ⏰ TTL Performance
+### 🗄️ Storage & Compression Performance
 
-| TTL Operation | Performance(ops/sec) | Latency(ns/op) | TTL Efficiency |
-|---------------|----------------------|----------------|----------------|
-| **PutWithTTL** | 150,183 | 8,232 ns | 🟢 Excellent |
-| **TTL Update** | 101,009 | 9,907 ns | 🟢 High |
+| Storage Related Tests | Performance(ops/sec) | Latency(ns/op) | Memory Usage(B/op) | Efficiency Rating |
+|-----------------------|----------------------|----------------|--------------------|------------------|
+| **File Rotation** | 86 | 11,632,434 ns | 670,197 B | 🟡 Needs Optimization |
+| **Compression Recovery** | 4,227 | 236,366 ns | 236,838 B | 🟡 Medium |
 
-#### 📈 Transaction Processing Performance
+### 📈 Transaction Processing Performance
 
-| Transaction Type | Performance(ops/sec) | Latency(ns/op) | Transaction Overhead |
-|------------------|----------------------|----------------|-------------------|
-| **Direct Operations** | 12,529 | 79,797 ns | 🟢 Baseline |
-| **Transaction Operations** | 1,266 | 78,997 ns | 🟢 Low Overhead |
-| **Transaction Commit** | 162,409 | 6,159 ns | 🟢 Ultra Fast |
-| **Stress Test** | 19,064 | 6,155 ns | 🟢 Excellent |
+| Transaction Operation Type | Performance(ops/sec) | Latency(ns/op) | Memory Usage(B/op) | Transaction Rating |
+|----------------------------|----------------------|----------------|--------------------|------------------|
+| **Transaction Write** | 106,877 | 9,307 ns | 822 B | 🟢 Excellent |
+| **Transaction Batch** | 1,452 | 912,089 ns | 82,567 B | 🟡 Medium |
+| **Transaction Rollback** | 486,193 | 2,056 ns | 2,435 B | 🟢 Ultra Fast |
 
-#### 📊 Real-time Monitoring Performance
+### 🎯 Performance Summary & Optimization Recommendations
 
-| Monitoring Feature | Performance(ops/sec) | Latency(ns/op) | Monitoring Overhead |
-|--------------------|----------------------|----------------|-------------------|
-| **Real-time Monitoring** | 19,654 | 77,905 ns | 🟢 Low |
-| **System Resource Monitoring** | 135,146 | 657,540 ns | 🟢 Acceptable |
-| **Concurrent Monitoring** | 21,034 | 57,010 ns | 🟢 Low |
+#### ✅ Strength Areas
+- **Read Performance**: 466ns latency, achieving microsecond-level response
+- **Concurrent Reads**: 497K ops/sec, extremely high concurrent processing capability
+- **Delete Operations**: 2.8μs latency, fast cleanup capability
+- **Transaction Rollback**: 2μs latency, almost zero overhead
 
-### 🏆 Performance Champions
+#### ⚠️ Areas for Optimization
+- **Batch Reads**: 377 ops/sec, 1000 items require 2.6ms, still room for improvement
+- **File Rotation**: 86 ops/sec, large file processing is slow
+- **Batch Writes**: 2.8K ops/sec, batch operation efficiency is moderate
 
-1. **Fastest Read**: Get operation - 464.0 ns/op
-2. **Fastest Delete**: Delete operation - 2,599 ns/op
-3. **Highest Concurrency**: Concurrent TTL - 101,009 ops/sec
-4. **Lowest Latency**: Exists check - 445.8 ns/op
-5. **Best Transaction**: Transaction commit - 6,159 ns/op
+#### 🔧 Optimization Achievements
+- **Batch Read Optimization**: Improved from 369 ops/sec to 377 ops/sec (+2.2%)
+- **Memory Usage Optimization**: Batch read memory usage reduced from 205KB to 114KB (-44%)
+- **Cache Hit Rate**: Improved hot data access efficiency through cache-first strategy
 
-### 💡 Key Findings
+### 💡 Usage Recommendations
 
-- **Excellent Read Performance**: Get operations achieve microsecond-level response
-- **Strong Concurrency**: All concurrent tests performed well
-- **Low Transaction Overhead**: Transaction operations only ~20% slower than direct operations
-- **Stable TTL Performance**: TTL operations don't affect basic performance
+**High-Concurrency Read Scenarios**: GojiDB performs excellently in concurrent reads, suitable for read-heavy applications
+**Transaction Processing**: Transaction overhead is extremely low, feel free to use ACID features
+**Batch Operations**: For large batch operations, recommend processing in batches for better performance
 - **Usable Monitoring**: Real-time monitoring overhead is acceptable
 
 ### Latest Test Validation (2025-01-19)
