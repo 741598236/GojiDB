@@ -284,6 +284,10 @@ func (db *GojiDB) BatchPut(items map[string][]byte) error {
 	pos, _ := db.activeFile.Seek(0, io.SeekEnd)
 	currentPos := pos
 
+	// 使用对象池优化
+	entry := GlobalEntryPool.GetEntry()
+	defer GlobalEntryPool.PutEntry(entry)
+
 	// 批量写入所有条目
 	for key, value := range items {
 		if key == "" {
@@ -296,15 +300,13 @@ func (db *GojiDB) BatchPut(items map[string][]byte) error {
 			return fmt.Errorf("压缩失败: %v", err)
 		}
 
-		// 构建entry
-		entry := &Entry{
-			Timestamp:   uint32(time.Now().Unix()),
-			KeySize:     uint16(len(key)),
-			ValueSize:   uint32(len(compressed)),
-			Compression: algorithm,
-			Key:         []byte(key),
-			Value:       compressed,
-		}
+		// 重置并复用Entry对象
+		entry.Timestamp = uint32(time.Now().Unix())
+		entry.KeySize = uint16(len(key))
+		entry.ValueSize = uint32(len(compressed))
+		entry.Compression = algorithm
+		entry.Key = []byte(key)
+		entry.Value = compressed
 		entry.CRC = db.calculateCRC(entry)
 
 		// 序列化到预分配缓冲区
@@ -318,15 +320,16 @@ func (db *GojiDB) BatchPut(items map[string][]byte) error {
 			return err
 		}
 
-		// 批量更新keyDir
-		db.keyDir.Set(key, &KeyDir{
-			FileID:      db.activeFileID,
-			ValueSize:   entry.ValueSize,
-			ValuePos:    uint64(currentPos + HeaderSize + int64(entry.KeySize)),
-			Timestamp:   entry.Timestamp,
-			Compression: entry.Compression,
-			Deleted:     false,
-		})
+		// 使用KeyDir池优化索引创建
+		keyDir := GlobalKeyDirPool.GetKeyDir()
+		keyDir.FileID = db.activeFileID
+		keyDir.ValueSize = entry.ValueSize
+		keyDir.ValuePos = uint64(currentPos + HeaderSize + int64(entry.KeySize))
+		keyDir.Timestamp = entry.Timestamp
+		keyDir.Compression = entry.Compression
+		keyDir.Deleted = false
+
+		db.keyDir.Set(key, keyDir)
 
 		currentPos += int64(len(data))
 
@@ -365,6 +368,9 @@ func (db *GojiDB) BatchGet(keys []string) (map[string][]byte, error) {
 		}
 	}()
 
+	// 使用内存池优化内存分配
+	bufferPool := GlobalAdaptivePool
+
 	// 优化的串行处理
 	for _, key := range keys {
 		if key == "" {
@@ -384,30 +390,32 @@ func (db *GojiDB) BatchGet(keys []string) (map[string][]byte, error) {
 			continue
 		}
 
-		var data []byte
+		// 使用内存池获取缓冲区
+		dataBuf := bufferPool.GetBuffer(int(info.ValueSize))
+		data := *dataBuf
+
 		var err error
 
 		// 使用文件缓存减少重复打开
 		if info.FileID == db.activeFileID {
-			data = make([]byte, info.ValueSize)
-			_, err = db.activeFile.ReadAt(data, int64(info.ValuePos))
+			_, err = db.activeFile.ReadAt(data[:info.ValueSize], int64(info.ValuePos))
 		} else {
 			f, ok := fileCache[info.FileID]
 			if !ok {
 				filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", info.FileID))
 				f, err = os.Open(filename)
 				if err != nil {
+					bufferPool.PutBuffer(dataBuf) // 归还缓冲区
 					results[key] = []byte{}
 					continue
 				}
 				fileCache[info.FileID] = f
 			}
-			data = make([]byte, info.ValueSize)
-			_, err = f.ReadAt(data, int64(info.ValuePos))
+			_, err = f.ReadAt(data[:info.ValueSize], int64(info.ValuePos))
 		}
 
 		if err == nil {
-			decompressed, err := db.decompress(data, info.Compression)
+			decompressed, err := db.decompress(data[:info.ValueSize], info.Compression)
 			if err == nil {
 				results[key] = decompressed
 			} else {
@@ -416,6 +424,9 @@ func (db *GojiDB) BatchGet(keys []string) (map[string][]byte, error) {
 		} else {
 			results[key] = []byte{}
 		}
+
+		// 归还缓冲区
+		bufferPool.PutBuffer(dataBuf)
 
 		if db.config.EnableMetrics {
 			atomic.AddInt64(&db.metrics.TotalReads, 1)

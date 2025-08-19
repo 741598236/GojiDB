@@ -406,7 +406,7 @@ func printWelcome() {
 	fmt.Printf(`
 %s%s╔══════════════════════════════════════════════════════╗%s
 `, CliBold, CliCyan, CliReset)
-	fmt.Printf(`%s%s║           %s🍒 GojiDB v2.1.0 智能交互终端%s               ║%s
+	fmt.Printf(`%s%s║           %s🍒 GojiDB v1.0.0 智能交互终端%s               ║%s
 `, CliBold, CliCyan, CliBold+CliWhite, CliCyan, CliReset)
 	fmt.Printf(`%s%s║           %s✨ 高性能键值存储数据库%s                      ║%s
 `, CliBold, CliCyan, CliBold+CliGreen, CliCyan, CliReset)
@@ -1965,20 +1965,43 @@ func handleBenchmark(db *GojiDB, parts []string) error {
 			continue
 		}
 
-		// 性能等级
+		// 性能等级 - 基于操作类型的分层评价标准
 		var grade, colorCode string
 		var scoreBar string
+		var thresholds []float64
+
+		// 根据测试类型选择对应的评价标准
+		switch test.name {
+		case "写入性能", "删除性能":
+			thresholds = []float64{100000, 50000, 10000, 1000}
+		case "读取性能":
+			thresholds = []float64{500000, 100000, 50000, 10000}
+		case "批量写入", "批量读取":
+			thresholds = []float64{50000, 20000, 5000, 1000}
+		case "并发写入", "并发读取":
+			thresholds = []float64{80000, 40000, 15000, 3000}
+		case "事务写入":
+			thresholds = []float64{30000, 15000, 5000, 1000}
+		case "压缩性能":
+			thresholds = []float64{20000, 10000, 5000, 1000}
+		case "文件轮转":
+			thresholds = []float64{15000, 8000, 3000, 800}
+		default:
+			thresholds = []float64{100000, 50000, 10000, 1000}
+		}
+
+		// 应用分层评价标准
 		switch {
-		case opSec >= 100000:
+		case opSec >= thresholds[0]:
 			grade, colorCode = "🌟 卓越", CliGreen
 			scoreBar = strings.Repeat("█", barWidth)
-		case opSec >= 50000:
+		case opSec >= thresholds[1]:
 			grade, colorCode = "🔥 优秀", CliGreen
 			scoreBar = strings.Repeat("█", int(float64(barWidth)*0.8))
-		case opSec >= 10000:
+		case opSec >= thresholds[2]:
 			grade, colorCode = "✅ 良好", CliGreen
 			scoreBar = strings.Repeat("█", int(float64(barWidth)*0.6))
-		case opSec >= 1000:
+		case opSec >= thresholds[3]:
 			grade, colorCode = "⚠️ 一般", CliYellow
 			scoreBar = strings.Repeat("█", int(float64(barWidth)*0.4))
 		default:
