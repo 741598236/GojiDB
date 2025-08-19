@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -345,7 +346,7 @@ func (db *GojiDB) BatchPut(items map[string][]byte) error {
 	return nil
 }
 
-// 批量读取操作 - 内存优化版本
+// 批量读取操作 - 终极零拷贝优化版本
 func (db *GojiDB) BatchGet(keys []string) (map[string][]byte, error) {
 	if len(keys) == 0 {
 		return make(map[string][]byte), nil
@@ -354,24 +355,13 @@ func (db *GojiDB) BatchGet(keys []string) (map[string][]byte, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	// 预分配结果map，避免扩容
+	// 预分配结果map
 	results := make(map[string][]byte, len(keys))
-
-	// 批量预读取文件信息，减少系统调用
-	fileCache := make(map[uint32]*os.File)
-	defer func() {
-		// 及时关闭打开的文件
-		for _, f := range fileCache {
-			if f != nil {
-				f.Close()
-			}
-		}
-	}()
-
-	// 使用内存池优化内存分配
-	bufferPool := GlobalAdaptivePool
-
-	// 优化的串行处理
+	
+	// 按文件ID分组请求
+	fileGroups := make(map[uint32][]*batchReadRequest)
+	
+	// 预筛选有效键并分组
 	for _, key := range keys {
 		if key == "" {
 			results[key] = []byte{}
@@ -390,50 +380,151 @@ func (db *GojiDB) BatchGet(keys []string) (map[string][]byte, error) {
 			continue
 		}
 
-		// 使用内存池获取缓冲区
-		dataBuf := bufferPool.GetBuffer(int(info.ValueSize))
-		data := *dataBuf
-
-		var err error
-
-		// 使用文件缓存减少重复打开
-		if info.FileID == db.activeFileID {
-			_, err = db.activeFile.ReadAt(data[:info.ValueSize], int64(info.ValuePos))
-		} else {
-			f, ok := fileCache[info.FileID]
-			if !ok {
-				filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", info.FileID))
-				f, err = os.Open(filename)
-				if err != nil {
-					bufferPool.PutBuffer(dataBuf) // 归还缓冲区
-					results[key] = []byte{}
-					continue
-				}
-				fileCache[info.FileID] = f
-			}
-			_, err = f.ReadAt(data[:info.ValueSize], int64(info.ValuePos))
+		req := &batchReadRequest{
+			key:         key,
+			fileID:      info.FileID,
+			offset:      int64(info.ValuePos),
+			size:        int(info.ValueSize),
+			compression: info.Compression,
 		}
-
-		if err == nil {
-			decompressed, err := db.decompress(data[:info.ValueSize], info.Compression)
-			if err == nil {
-				results[key] = decompressed
-			} else {
-				results[key] = []byte{}
-			}
-		} else {
-			results[key] = []byte{}
-		}
-
-		// 归还缓冲区
-		bufferPool.PutBuffer(dataBuf)
-
-		if db.config.EnableMetrics {
-			atomic.AddInt64(&db.metrics.TotalReads, 1)
-		}
+		
+		fileGroups[info.FileID] = append(fileGroups[info.FileID], req)
 	}
 
+	// 使用工作池并行处理
+	return db.batchGetOptimized(fileGroups, results)
+}
+
+// batchReadRequest 优化的读取请求
+type batchReadRequest struct {
+	key         string
+	fileID      uint32
+	offset      int64
+	size        int
+	compression CompressionType
+}
+
+// batchGetOptimized 优化的批量读取实现
+func (db *GojiDB) batchGetOptimized(fileGroups map[uint32][]*batchReadRequest, results map[string][]byte) (map[string][]byte, error) {
+	if len(fileGroups) == 0 {
+		return results, nil
+	}
+
+	// 计算最优工作线程数
+	numWorkers := runtime.NumCPU()
+	if len(fileGroups) < numWorkers {
+		numWorkers = len(fileGroups)
+	}
+	if numWorkers == 0 {
+		numWorkers = 1
+	}
+
+	// 创建任务通道
+	tasks := make(chan *fileReadTask, len(fileGroups))
+	var wg sync.WaitGroup
+	
+	// 启动工作池
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go db.fileReadWorker(tasks, results, &wg)
+	}
+
+	// 分发任务
+	for fileID, requests := range fileGroups {
+		if len(requests) > 0 {
+			tasks <- &fileReadTask{
+				fileID:   fileID,
+				requests: requests,
+			}
+		}
+	}
+	close(tasks)
+	
+	wg.Wait()
+	
+	if db.config.EnableMetrics {
+		atomic.AddInt64(&db.metrics.TotalReads, int64(len(results)))
+	}
+	
 	return results, nil
+}
+
+// fileReadTask 文件读取任务
+type fileReadTask struct {
+	fileID   uint32
+	requests []*batchReadRequest
+}
+
+// fileReadWorker 文件读取工作协程
+func (db *GojiDB) fileReadWorker(tasks <-chan *fileReadTask, results map[string][]byte, wg *sync.WaitGroup) {
+	defer wg.Done()
+	
+	// 每个worker复用缓冲区
+	buffer := make([]byte, 256*1024) // 256KB复用缓冲区
+	
+	for task := range tasks {
+		db.processFileTask(task, results, buffer)
+	}
+}
+
+// processFileTask 处理单个文件任务
+func (db *GojiDB) processFileTask(task *fileReadTask, results map[string][]byte, buffer []byte) {
+	if len(task.requests) == 0 {
+		return
+	}
+
+	// 按偏移量排序优化磁盘访问
+	sort.Slice(task.requests, func(i, j int) bool {
+		return task.requests[i].offset < task.requests[j].offset
+	})
+
+	var file *os.File
+	var err error
+
+	// 打开文件
+	if task.fileID == db.activeFileID {
+		file = db.activeFile
+	} else {
+		filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", task.fileID))
+		file, err = os.Open(filename)
+		if err != nil {
+			// 文件不存在，所有请求返回空
+			for _, req := range task.requests {
+				results[req.key] = []byte{}
+			}
+			return
+		}
+		defer file.Close()
+	}
+
+	// 批量读取优化
+	for _, req := range task.requests {
+		if req.size > len(buffer) {
+			// 如果单个数据太大，分配临时缓冲区
+			tempBuffer := make([]byte, req.size)
+			db.readAndDecompress(file, req, results, tempBuffer)
+		} else {
+			db.readAndDecompress(file, req, results, buffer[:req.size])
+		}
+	}
+}
+
+// readAndDecompress 读取并解压数据
+func (db *GojiDB) readAndDecompress(file *os.File, req *batchReadRequest, results map[string][]byte, buffer []byte) {
+	_, err := file.ReadAt(buffer, req.offset)
+	if err != nil {
+		results[req.key] = []byte{}
+		return
+	}
+
+	// 解压数据
+	decompressed, err := db.decompress(buffer, req.compression)
+	if err != nil {
+		results[req.key] = []byte{}
+		return
+	}
+
+	results[req.key] = decompressed
 }
 
 // Get 根据键获取对应的值
