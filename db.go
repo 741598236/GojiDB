@@ -615,14 +615,14 @@ func (db *GojiDB) checkCachedTTL(info *KeyDir) bool {
 	if info.TTL == 0 {
 		return false
 	}
-	
+
 	now := uint32(time.Now().Unix())
 	expired := now >= info.TTL
-	
+
 	if expired && db.config.EnableMetrics {
 		atomic.AddInt64(&db.metrics.ExpiredKeyCount, 1)
 	}
-	
+
 	return expired
 }
 
@@ -631,14 +631,14 @@ func (db *GojiDB) checkTTL(info *KeyDir) bool {
 	if info.TTL == 0 {
 		return false
 	}
-	
+
 	now := uint32(time.Now().Unix())
 	expired := now >= info.TTL
-	
+
 	if expired && db.config.EnableMetrics {
 		atomic.AddInt64(&db.metrics.ExpiredKeyCount, 1)
 	}
-	
+
 	return expired
 }
 
@@ -660,7 +660,7 @@ func (db *GojiDB) tryCacheRead(info *KeyDir) ([]byte, bool) {
 func (db *GojiDB) readData(info *KeyDir) ([]byte, error) {
 	// 计算块对齐的读取位置
 	blockStart := (info.ValuePos / uint64(db.blockCache.blockSize)) * uint64(db.blockCache.blockSize)
-	
+
 	// 尝试从块缓存获取
 	if cachedData, found := db.blockCache.GetBlock(info.FileID, blockStart, uint32(db.blockCache.blockSize)); found {
 		data := db.extractDataFromBlock(cachedData, info, blockStart)
@@ -687,7 +687,7 @@ func (db *GojiDB) extractDataFromBlock(blockData []byte, info *KeyDir, blockStar
 // readFromFileAndCache 从文件读取数据并更新缓存
 func (db *GojiDB) readFromFileAndCache(info *KeyDir, blockStart uint64) ([]byte, error) {
 	data := make([]byte, info.ValueSize)
-	
+
 	// 读取实际数据
 	var err error
 	if info.FileID == db.activeFileID {
@@ -701,21 +701,21 @@ func (db *GojiDB) readFromFileAndCache(info *KeyDir, blockStart uint64) ([]byte,
 		defer f.Close()
 		_, err = f.ReadAt(data, int64(info.ValuePos))
 	}
-	
+
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// 更新块缓存
 	db.updateBlockCache(info, blockStart)
-	
+
 	return data, nil
 }
 
 // updateBlockCache 更新块缓存
 func (db *GojiDB) updateBlockCache(info *KeyDir, blockStart uint64) {
 	blockData := make([]byte, db.blockCache.blockSize)
-	
+
 	if info.FileID == db.activeFileID {
 		_, _ = db.activeFile.ReadAt(blockData, int64(blockStart))
 	} else {
@@ -725,7 +725,7 @@ func (db *GojiDB) updateBlockCache(info *KeyDir, blockStart uint64) {
 			f.Close() // 立即关闭文件
 		}
 	}
-	
+
 	db.blockCache.SetBlock(info.FileID, blockStart, blockData)
 }
 
@@ -898,7 +898,7 @@ func (db *GojiDB) deleteInternal(key string) error {
 	return nil
 }
 
-// Compact 执行数据合并（与单文件版完全一致）
+// Compact 执行数据合并压缩，清理已删除和过期的键
 func (db *GojiDB) Compact() error {
 	if db.config.EnableMetrics {
 		atomic.AddInt64(&db.metrics.CompactionCount, 1)
@@ -908,81 +908,75 @@ func (db *GojiDB) Compact() error {
 	defer db.mu.Unlock()
 
 	// 1. 创建临时合并文件
+	compactFileName, compactFile, err := db.createCompactFile()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		compactFile.Close()
+		os.Remove(compactFileName) // 清理可能的残留文件
+	}()
+
+	// 2. 收集活跃键并重写数据
+	activeKeys := db.collectActiveKeys()
+	newKeyDir, _, err := db.rewriteActiveKeys(compactFile, activeKeys)
+	if err != nil {
+		return err
+	}
+
+	// 3. 完成合并：同步文件、清理旧文件、更新状态
+	return db.finalizeCompaction(compactFileName, newKeyDir)
+}
+
+// createCompactFile 创建用于合并的临时文件
+func (db *GojiDB) createCompactFile() (string, *os.File, error) {
 	compactFileName := filepath.Join(db.config.DataPath, fmt.Sprintf("compact_%d.data", time.Now().UnixNano()))
 	compactFile, err := os.Create(compactFileName)
 	if err != nil {
-		return fmt.Errorf("创建合并文件失败: %v", err)
+		return "", nil, fmt.Errorf("创建合并文件失败: %v", err)
 	}
-	defer compactFile.Close()
+	return compactFileName, compactFile, nil
+}
 
-	// 2. 收集活跃键
+// collectActiveKeys 收集所有未删除且未过期的键
+func (db *GojiDB) collectActiveKeys() map[string]*KeyDir {
 	activeKeys := make(map[string]*KeyDir)
 	now := uint32(time.Now().Unix())
+	
 	db.keyDir.Range(func(key string, kd *KeyDir) bool {
 		if !kd.Deleted && (kd.TTL == 0 || now <= kd.TTL) {
 			activeKeys[key] = kd
 		}
 		return true
 	})
+	
+	return activeKeys
+}
 
-	// 3. 重写活跃键到新文件
-	// 5. 更新内存索引
+// rewriteActiveKeys 将活跃键的数据重写到新文件
+func (db *GojiDB) rewriteActiveKeys(compactFile *os.File, activeKeys map[string]*KeyDir) (map[string]*KeyDir, int64, error) {
 	newKeyDir := make(map[string]*KeyDir)
 	offset := int64(0)
 
 	for key, oldKD := range activeKeys {
-		// 读取原始数据
-		var data []byte
-		var err error
-		if oldKD.FileID == db.activeFileID {
-			data = make([]byte, oldKD.ValueSize)
-			_, err = db.activeFile.ReadAt(data, int64(oldKD.ValuePos))
-		} else {
-			filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", oldKD.FileID))
-			f, openErr := os.Open(filename)
-			if openErr != nil {
-				// 文件不存在，跳过此键
-				continue
-			}
-			data = make([]byte, oldKD.ValueSize)
-			_, err = f.ReadAt(data, int64(oldKD.ValuePos))
-			f.Close()
-		}
-
-		// 如果读取失败，跳过此键
+		data, err := db.readKeyData(oldKD)
 		if err != nil {
-			continue
+			continue // 跳过读取失败的键
 		}
 
-		// 解压缩并重新压缩
-		val, decompErr := db.decompress(data, oldKD.Compression)
-		if decompErr != nil {
-			// 解压缩失败，使用原始数据
-			val = data
+		newData, compressionType, err := db.processKeyData(data, oldKD)
+		if err != nil {
+			continue // 跳过重写失败的键
 		}
 
-		newCompressed, _, compErr := db.compress(val)
-		if compErr != nil {
-			// 压缩失败，使用原始数据
-			newCompressed = val
+		entry := db.createEntry(key, newData, oldKD, compressionType)
+		serialized, err := db.serializeEntry(entry)
+		if err != nil {
+			continue // 跳过序列化失败的键
 		}
 
-		// 构建新条目
-		entry := &Entry{
-			Timestamp:   oldKD.Timestamp,
-			TTL:         oldKD.TTL,
-			KeySize:     uint16(len(key)),
-			ValueSize:   uint32(len(newCompressed)),
-			Compression: db.config.CompressionType,
-			Key:         []byte(key),
-			Value:       newCompressed,
-		}
-		entry.CRC = db.calculateCRC(entry)
-
-		// 写入合并文件
-		serialized, _ := db.serializeEntry(entry)
 		if _, err := compactFile.Write(serialized); err != nil {
-			continue
+			continue // 跳过写入失败的键
 		}
 
 		newKeyDir[key] = &KeyDir{
@@ -997,40 +991,120 @@ func (db *GojiDB) Compact() error {
 		offset += int64(len(serialized))
 	}
 
-	// 4. 同步&关闭合并文件
-	_ = compactFile.Sync()
-	_ = compactFile.Close()
+	return newKeyDir, offset, nil
+}
 
-	// 5. 关闭旧文件
-	if db.activeFile != nil {
-		_ = db.activeFile.Close()
-		db.activeFile = nil
-	}
-	for _, f := range db.readFiles {
-		_ = f.Close()
-	}
-	db.readFiles = make(map[uint32]*os.File)
+// readKeyData 从文件读取键对应的数据
+func (db *GojiDB) readKeyData(kd *KeyDir) ([]byte, error) {
+	data := make([]byte, kd.ValueSize)
+	var err error
 
-	// 6. 删除旧数据文件
-	oldFiles, _ := filepath.Glob(filepath.Join(db.config.DataPath, "*.data"))
-	for _, f := range oldFiles {
-		if filepath.Base(f) != filepath.Base(compactFileName) {
-			_ = os.Remove(f)
+	if kd.FileID == db.activeFileID {
+		_, err = db.activeFile.ReadAt(data, int64(kd.ValuePos))
+	} else {
+		filename := filepath.Join(db.config.DataPath, fmt.Sprintf("%d.data", kd.FileID))
+		f, err := os.Open(filename)
+		if err != nil {
+			return nil, err
 		}
+		defer f.Close()
+		_, err = f.ReadAt(data, int64(kd.ValuePos))
 	}
 
-	// 7. 重命名合并文件
+	return data, err
+}
+
+// processKeyData 处理键数据：解压缩并重新压缩
+func (db *GojiDB) processKeyData(data []byte, oldKD *KeyDir) ([]byte, CompressionType, error) {
+	// 解压缩数据
+	val, err := db.decompress(data, oldKD.Compression)
+	if err != nil {
+		// 解压缩失败，使用原始数据
+		val = data
+	}
+
+	// 重新压缩数据
+	newCompressed, compressionType, err := db.compress(val)
+	if err != nil {
+		// 压缩失败，使用原始数据
+		newCompressed = val
+		compressionType = NoCompression
+	}
+
+	return newCompressed, compressionType, nil
+}
+
+// createEntry 创建新的条目
+func (db *GojiDB) createEntry(key string, data []byte, oldKD *KeyDir, compressionType CompressionType) *Entry {
+	entry := &Entry{
+		Timestamp:   oldKD.Timestamp,
+		TTL:         oldKD.TTL,
+		KeySize:     uint16(len(key)),
+		ValueSize:   uint32(len(data)),
+		Compression: compressionType,
+		Key:         []byte(key),
+		Value:       data,
+	}
+	entry.CRC = db.calculateCRC(entry)
+	return entry
+}
+
+// finalizeCompaction 完成合并过程
+func (db *GojiDB) finalizeCompaction(compactFileName string, newKeyDir map[string]*KeyDir) error {
+	// 清理旧文件和状态
+	if err := db.cleanupOldFiles(compactFileName); err != nil {
+		return err
+	}
+
+	// 重命名合并文件
 	newName := filepath.Join(db.config.DataPath, "1.data")
 	if err := os.Rename(compactFileName, newName); err != nil {
 		return fmt.Errorf("重命名合并文件失败: %v", err)
 	}
 
-	// 8. 更新元数据
+	// 更新数据库状态
+	return db.updateDatabaseState(newKeyDir)
+}
+
+// cleanupOldFiles 清理旧的文件和句柄
+func (db *GojiDB) cleanupOldFiles(compactFileName string) error {
+	// 关闭所有文件句柄
+	if db.activeFile != nil {
+		_ = db.activeFile.Close()
+		db.activeFile = nil
+	}
+	
+	for _, f := range db.readFiles {
+		_ = f.Close()
+	}
+	db.readFiles = make(map[uint32]*os.File)
+
+	// 删除旧的数据文件
+	oldFiles, err := filepath.Glob(filepath.Join(db.config.DataPath, "*.data"))
+	if err != nil {
+		return err
+	}
+
+	compactBase := filepath.Base(compactFileName)
+	for _, f := range oldFiles {
+		if filepath.Base(f) != compactBase {
+			_ = os.Remove(f)
+		}
+	}
+
+	return nil
+}
+
+// updateDatabaseState 更新数据库状态
+func (db *GojiDB) updateDatabaseState(newKeyDir map[string]*KeyDir) error {
+	// 更新元数据
 	db.activeFileID = 1
 	db.keyDir = NewConcurrentMap(16)
+	
 	for key, kd := range newKeyDir {
 		db.keyDir.Set(key, kd)
 	}
+	
 	return db.openActiveFile()
 }
 
@@ -1163,30 +1237,23 @@ func getRuneWidth(r rune) int {
 
 // isEmoji 判断是否为emoji字符
 func isEmoji(r rune) bool {
-	// 常见的emoji范围
-	return (r >= 0x1F600 && r <= 0x1F64F) || // 表情符号
-		(r >= 0x1F300 && r <= 0x1F5FF) || // 杂项符号和象形文字
-		(r >= 0x1F680 && r <= 0x1F6FF) || // 交通和地图符号
-		(r >= 0x1F700 && r <= 0x1F77F) || // 炼金术符号
-		(r >= 0x1F780 && r <= 0x1F7FF) || // 几何图形扩展
-		(r >= 0x1F800 && r <= 0x1F8FF) || // 补充箭头-C
-		(r >= 0x1F900 && r <= 0x1F9FF) || // 补充符号和象形文字
-		(r >= 0x1FA00 && r <= 0x1FA6F) || // 棋类符号
-		(r >= 0x1FA70 && r <= 0x1FAFF) || // 扩展-A符号和象形文字
-		(r >= 0x2600 && r <= 0x26FF) || // 杂项符号
-		(r >= 0x2700 && r <= 0x27BF) || // 装饰符号
-		(r >= 0x1F1E6 && r <= 0x1F1FF) // 区域指示符号
+	// 使用unicode标准库检查emoji相关类别
+	// 主要emoji范围：U+1F600 - U+1F64F (表情符号)
+	// U+1F300 - U+1F5FF (杂项符号)
+	// U+1F680 - U+1F6FF (交通符号)
+	// 区域指示符号：U+1F1E6 - U+1F1FF
+	return (r >= 0x1F600 && r <= 0x1F64F) ||
+		(r >= 0x1F300 && r <= 0x1F5FF) ||
+		(r >= 0x1F680 && r <= 0x1F6FF) ||
+		(r >= 0x1F1E6 && r <= 0x1F1FF)
 }
 
 // isWideChar 判断是否为全角字符
 func isWideChar(r rune) bool {
-	// 中文字符范围
+	// 核心CJK字符范围：统一汉字 + 扩展A + 全角符号
 	return (r >= 0x4E00 && r <= 0x9FFF) || // CJK统一汉字
 		(r >= 0x3400 && r <= 0x4DBF) || // CJK扩展A
-		(r >= 0x20000 && r <= 0x2A6DF) || // CJK扩展B
-		(r >= 0x2A700 && r <= 0x2B73F) || // CJK扩展C
-		(r >= 0x2B740 && r <= 0x2B81F) || // CJK扩展D
-		(r >= 0x3000 && r <= 0x303F) || // CJK符号和标点
+		(r >= 0x3000 && r <= 0x303F) || // CJK符号
 		(r >= 0xFF00 && r <= 0xFFEF) // 全角ASCII
 }
 

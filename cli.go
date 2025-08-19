@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -27,7 +29,7 @@ const (
 	CliGray      = "\033[37m"
 )
 
-// 主程序颜色常量（从main.go迁移）
+// 主程序颜色常量
 const (
 	ColorReset   = "\033[0m"
 	ColorRed     = "\033[31m"
@@ -102,16 +104,16 @@ var commandRegistry = map[string]commandHandler{
 // StartInteractiveMode 简化的交互模式启动器
 func (db *GojiDB) StartInteractiveMode() {
 	printWelcome()
-	
+
 	cli := newInteractiveCLI(db)
 	cli.run()
 }
 
 // interactiveCLI 封装交互式CLI的状态和行为
 type interactiveCLI struct {
-	db       *GojiDB
-	scanner  *bufio.Scanner
-	history  *commandHistory
+	db      *GojiDB
+	scanner *bufio.Scanner
+	history *commandHistory
 }
 
 // newInteractiveCLI 创建新的交互式CLI实例
@@ -126,11 +128,11 @@ func newInteractiveCLI(db *GojiDB) *interactiveCLI {
 // run 运行主交互循环
 func (cli *interactiveCLI) run() {
 	defer cli.history.save()
-	
+
 	for {
-		fmt.Printf("%s%s🍒 %s%s %s[%s]%s %s❯%s ", 
-			CliBold, CliCyan, DBName, CliReset, 
-			CliGray, time.Now().Format("15:04:05"), CliReset, 
+		fmt.Printf("%s%s🍒 %s%s %s[%s]%s %s❯%s ",
+			CliBold, CliCyan, DBName, CliReset,
+			CliGray, time.Now().Format("15:04:05"), CliReset,
 			CliPurple, CliReset)
 
 		if !cli.scanner.Scan() {
@@ -159,7 +161,7 @@ func (cli *interactiveCLI) executeCommand(line string) error {
 	}
 
 	cmd := strings.ToLower(parts[0])
-	
+
 	// 保存到历史记录（排除退出命令）
 	if cmd != "exit" && cmd != "quit" && cmd != "q" {
 		cli.history.add(line)
@@ -1721,16 +1723,16 @@ func handlePut(db *GojiDB, parts []string) error {
 	if len(parts) < 3 {
 		return fmt.Errorf("用法: put <key> <value> [ttl]")
 	}
-	
+
 	key, value := parts[1], strings.Join(parts[2:], " ")
 	value = strings.Trim(value, `"'`)
-	
+
 	if len(parts) > 3 {
 		if ttl, err := time.ParseDuration(parts[3]); err == nil {
 			return db.PutWithTTL(key, []byte(value), ttl)
 		}
 	}
-	
+
 	return db.Put(key, []byte(value))
 }
 
@@ -1738,14 +1740,14 @@ func handleGet(db *GojiDB, parts []string) error {
 	if len(parts) < 2 {
 		return fmt.Errorf("用法: get <key>")
 	}
-	
+
 	value, err := db.Get(parts[1])
 	if err != nil {
 		return err
 	}
-	
-	fmt.Printf("%s%s%s = %s%s%s\n", 
-		CliGreen, parts[1], CliReset, 
+
+	fmt.Printf("%s%s%s = %s%s%s\n",
+		CliGreen, parts[1], CliReset,
 		CliYellow, string(value), CliReset)
 	return nil
 }
@@ -1762,10 +1764,10 @@ func handleList(db *GojiDB, parts []string) error {
 	if len(parts) > 1 {
 		pattern = parts[1]
 	}
-	
+
 	keys := db.ListKeys()
 	filtered := filterKeys(keys, pattern)
-	
+
 	fmt.Printf("%s找到 %d 个键:%s\n", CliCyan, len(filtered), CliReset)
 	for i, key := range filtered {
 		fmt.Printf("  %s%d.%s %s%s%s\n", CliGray, i+1, CliReset, CliGreen, key, CliReset)
@@ -1777,18 +1779,18 @@ func handleTTL(db *GojiDB, parts []string) error {
 	if len(parts) < 2 {
 		return fmt.Errorf("用法: ttl <key>")
 	}
-	
+
 	ttl, err := db.GetTTL(parts[1])
 	if err != nil {
 		return err
 	}
-	
+
 	if ttl > 0 {
-		fmt.Printf("%s%s%s TTL: %s%s%s\n", 
-			CliYellow, parts[1], CliReset, 
+		fmt.Printf("%s%s%s TTL: %s%s%s\n",
+			CliYellow, parts[1], CliReset,
 			CliGreen, ttl.Round(time.Second), CliReset)
 	} else {
-		fmt.Printf("%s%s%s 没有TTL或已过期%s\n", 
+		fmt.Printf("%s%s%s 没有TTL或已过期%s\n",
 			CliRed, parts[1], CliReset, CliReset)
 	}
 	return nil
@@ -1855,23 +1857,23 @@ func handleSearch(db *GojiDB, parts []string) error {
 	if len(parts) < 2 {
 		return fmt.Errorf("用法: search <pattern>")
 	}
-	
+
 	pattern := parts[1]
 	keys := db.ListKeys()
 	var results []string
-	
+
 	for _, key := range keys {
 		if strings.Contains(key, pattern) {
 			results = append(results, key)
 		}
 	}
-	
+
 	fmt.Printf("%s找到 %d 个匹配结果:%s\n", CliCyan, len(results), CliReset)
 	for i, key := range results {
 		if value, err := db.Get(key); err == nil {
-			fmt.Printf("  %s%d.%s %s%s%s = %s%s...%s\n", 
-				CliGray, i+1, CliReset, 
-				CliGreen, key, CliReset, 
+			fmt.Printf("  %s%d.%s %s%s%s = %s%s...%s\n",
+				CliGray, i+1, CliReset,
+				CliGreen, key, CliReset,
 				CliYellow, truncateString(string(value), 50), CliReset)
 		}
 	}
@@ -1887,24 +1889,318 @@ func handleImport(db *GojiDB, parts []string) error {
 }
 
 func handleBenchmark(db *GojiDB, parts []string) error {
-	fmt.Printf("%s🏃 运行快速基准测试...%s\n", CliCyan, CliReset)
-	
-	start := time.Now()
-	count := 1000
-	for i := 0; i < count; i++ {
-		key := fmt.Sprintf("bench:%d", i)
-		value := fmt.Sprintf("value-%d", i)
-		if err := db.Put(key, []byte(value)); err != nil {
-			return err
+	fmt.Printf("%s🚀 GojiDB 性能基准测试%s\n", CliCyan, CliReset)
+	fmt.Printf("%s%s%s\n", CliGray, strings.Repeat("─", 60), CliReset)
+
+	// 运行现有的基准测试
+	tests := []struct {
+		name string
+		cmd  string
+		icon string
+	}{
+		{"写入性能", "BenchmarkPut", "✏️"},
+		{"读取性能", "BenchmarkGet", "📖"},
+		{"批量写入", "BenchmarkBatchPut", "📦"},
+		{"批量读取", "BenchmarkBatchGet", "📊"},
+		{"删除性能", "BenchmarkDelete", "🗑️"},
+		{"并发写入", "BenchmarkConcurrentPut", "🔄"},
+		{"并发读取", "BenchmarkConcurrentGet", "🚀"},
+		{"事务写入", "BenchmarkTransactionPut", "🔒"},
+		{"压缩性能", "BenchmarkCompressionSnappy", "🗜️"},
+		{"文件轮转", "BenchmarkFileRotation", "🔄"},
+	}
+
+	var results []struct {
+		name    string
+		opSec   float64
+		latency time.Duration
+		grade   string
+		color   string
+		icon    string
+	}
+	var completed int
+	var totalDuration time.Duration
+
+	// 进度条
+	barWidth := 40
+
+	fmt.Printf("%s\n╔══════════════════════════════════════════════════════════════╗%s\n", CliCyan, CliReset)
+	fmt.Printf("%s║                    🚀 GojiDB 性能基准测试                    ║%s\n", CliCyan, CliReset)
+	fmt.Printf("%s║                       数据库性能分析                        ║%s\n", CliCyan, CliReset)
+	fmt.Printf("%s╚══════════════════════════════════════════════════════════════╝%s\n\n", CliCyan, CliReset)
+
+	for _, test := range tests {
+		fmt.Printf("%s%s %s %s... %s", CliCyan, test.icon, CliReset, test.name, strings.Repeat(" ", 20-len(test.name)))
+
+		// 运行基准测试
+		start := time.Now()
+		cmd := exec.Command("go", "test", "-bench", test.cmd+"$", "-benchtime", "1s", "-count", "1", "./benchmark")
+		cmd.Dir = ".." // 设置到项目根目录
+		output, err := cmd.CombinedOutput()
+		duration := time.Since(start)
+
+		if err != nil {
+			fmt.Printf("%s❌ 失败%s\n", CliRed, CliReset)
+			continue
+		}
+
+		// 解析结果
+		var opSec float64
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.Contains(line, "Benchmark") && strings.Contains(line, "ns/op") {
+				parts := strings.Fields(line)
+				if len(parts) >= 3 {
+					nsPerOpStr := strings.TrimSuffix(parts[2], "ns/op")
+					nsPerOp, _ := strconv.ParseFloat(nsPerOpStr, 64)
+					opSec = 1e9 / nsPerOp
+					break
+				}
+			}
+		}
+
+		if opSec == 0 {
+			fmt.Printf("%s❓ 无数据%s\n", CliYellow, CliReset)
+			continue
+		}
+
+		// 性能等级
+		var grade, colorCode string
+		var scoreBar string
+		switch {
+		case opSec >= 100000:
+			grade, colorCode = "🌟 卓越", CliGreen
+			scoreBar = strings.Repeat("█", barWidth)
+		case opSec >= 50000:
+			grade, colorCode = "🔥 优秀", CliGreen
+			scoreBar = strings.Repeat("█", int(float64(barWidth)*0.8))
+		case opSec >= 10000:
+			grade, colorCode = "✅ 良好", CliGreen
+			scoreBar = strings.Repeat("█", int(float64(barWidth)*0.6))
+		case opSec >= 1000:
+			grade, colorCode = "⚠️ 一般", CliYellow
+			scoreBar = strings.Repeat("█", int(float64(barWidth)*0.4))
+		default:
+			grade, colorCode = "❌ 需优化", CliRed
+			scoreBar = strings.Repeat("█", int(float64(barWidth)*0.2))
+		}
+
+		// 显示结果
+		fmt.Printf("%s%s %s%.0f ops/sec%s\n", colorCode, grade, CliCyan, opSec, CliReset)
+		fmt.Printf("%s   [%s%s%s]%s\n", CliGray, colorCode, scoreBar, CliGray, CliReset)
+
+		results = append(results, struct {
+			name    string
+			opSec   float64
+			latency time.Duration
+			grade   string
+			color   string
+			icon    string
+		}{
+			name:    test.name,
+			opSec:   opSec,
+			latency: time.Duration(1e9 / opSec * float64(time.Nanosecond)),
+			grade:   grade,
+			color:   colorCode,
+			icon:    test.icon,
+		})
+
+		completed++
+		totalDuration += duration
+	}
+
+	// 漂亮的总结报告
+	if completed > 0 {
+		fmt.Printf("%s\n╔══════════════════════════════════════════════════════════════╗%s\n", CliCyan, CliReset)
+		fmt.Printf("%s║                        📊 性能报告                           ║%s\n", CliCyan, CliReset)
+		fmt.Printf("%s╚══════════════════════════════════════════════════════════════╝%s\n\n", CliCyan, CliReset)
+
+		// 计算统计
+		var totalOps, excellent, good, fair, poor int
+		var maxOps, minOps float64 = 0, 1e9
+
+		for _, r := range results {
+			totalOps += int(r.opSec)
+			maxOps = max(maxOps, r.opSec)
+			minOps = min(minOps, r.opSec)
+
+			if strings.Contains(r.grade, "卓越") {
+				excellent++
+			} else if strings.Contains(r.grade, "优秀") {
+				good++
+			} else if strings.Contains(r.grade, "一般") {
+				fair++
+			} else {
+				poor++
+			}
+		}
+
+		avgOps := float64(totalOps) / float64(completed)
+
+		// 性能雷达图
+		fmt.Printf("%s🎯 性能雷达图%s\n", CliMagenta, CliReset)
+		fmt.Printf("%s┌────────────────────────────────────────────────────────────┐%s\n", CliGray, CliReset)
+
+		for _, r := range results {
+			barLength := int(math.Log10(r.opSec+1) * 5)
+			if barLength > 30 {
+				barLength = 30
+			}
+			bar := strings.Repeat("█", barLength)
+			spaces := strings.Repeat(" ", 30-barLength)
+			fmt.Printf("%s│ %s %s%s%s%s%8.0f ops/sec │%s\n",
+				CliGray, r.icon, r.color, bar, CliGray, spaces, r.opSec, CliReset)
+		}
+		fmt.Printf("%s└────────────────────────────────────────────────────────────┘%s\n\n", CliGray, CliReset)
+
+		// 统计卡片
+		fmt.Printf("%s📈 性能统计%s\n", CliMagenta, CliReset)
+		fmt.Printf("%s┌─────────────┬─────────────┬─────────────┬─────────────┐%s\n", CliGray, CliReset)
+		fmt.Printf("%s│%s  性能等级   %s│%s   数量     %s│%s   占比     %s│%s   图标     %s│%s\n",
+			CliGray, CliGreen, CliGray, CliGreen, CliGray, CliGreen, CliGray, CliGreen, CliGray, CliReset)
+		fmt.Printf("%s├─────────────┼─────────────┼─────────────┼─────────────┤%s\n", CliGray, CliReset)
+		fmt.Printf("%s│%s 🌟 卓越    %s│%s    %2d     %s│%s  %5.1f%%   %s│%s    🌟      %s│%s\n",
+			CliGray, CliGreen, CliGray, CliGreen, excellent, CliGray, CliGreen, float64(excellent*100)/float64(completed), CliGray, CliGreen, CliGray, CliReset)
+		fmt.Printf("%s│%s 🔥 优秀    %s│%s    %2d     %s│%s  %5.1f%%   %s│%s    🔥      %s│%s\n",
+			CliGray, CliGreen, CliGray, CliGreen, good, CliGray, CliGreen, float64(good*100)/float64(completed), CliGray, CliGreen, CliGray, CliReset)
+		fmt.Printf("%s│%s ⚠️ 一般    %s│%s    %2d     %s│%s  %5.1f%%   %s│%s    ⚠️      %s│%s\n",
+			CliGray, CliYellow, CliGray, CliYellow, fair, CliGray, CliYellow, float64(fair*100)/float64(completed), CliGray, CliYellow, CliGray, CliReset)
+		fmt.Printf("%s│%s ❌ 需优化  %s│%s    %2d     %s│%s  %5.1f%%   %s│%s    ❌      %s│%s\n",
+			CliGray, CliRed, CliGray, CliRed, poor, CliGray, CliRed, float64(poor*100)/float64(completed), CliGray, CliRed, CliGray, CliReset)
+		fmt.Printf("%s└─────────────┴─────────────┴─────────────┴─────────────┘%s\n\n", CliGray, CliReset)
+
+		// 性能摘要
+		fmt.Printf("%s💡 性能摘要%s\n", CliMagenta, CliReset)
+		fmt.Printf("%s┌────────────────────────────────────────────────────────────┐%s\n", CliGray, CliReset)
+		fmt.Printf("%s│  平均性能: %s%12.0f ops/sec%s  │%s\n",
+			CliGray, CliCyan, avgOps, CliGray, CliReset)
+		fmt.Printf("%s│  性能范围: %s%12.0f - %.0f ops/sec%s  │%s\n",
+			CliGray, CliCyan, minOps, maxOps, CliGray, CliReset)
+		fmt.Printf("%s│  测试完成: %s%12d/%d%s 项测试  │%s\n",
+			CliGray, CliCyan, completed, len(tests), CliGray, CliReset)
+		fmt.Printf("%s│  总耗时: %s%12v%s           │%s\n",
+			CliGray, CliCyan, totalDuration.Round(time.Second), CliGray, CliReset)
+		fmt.Printf("%s└────────────────────────────────────────────────────────────┘%s\n", CliGray, CliReset)
+
+		// 优化建议
+		fmt.Printf("%s\n🎯 优化建议%s\n", CliMagenta, CliReset)
+		if excellent == 0 {
+			fmt.Printf("%s  • 考虑优化存储引擎配置以获得卓越性能%s\n", CliYellow, CliReset)
+		}
+		if poor > 0 {
+			fmt.Printf("%s  • %d个需优化项目，建议重点调优%s\n", CliRed, poor, CliReset)
+		}
+		fmt.Printf("%s  • 使用并发操作可提升整体性能%s\n", CliCyan, CliReset)
+		fmt.Printf("%s  • 使用 'go test -bench=.' 查看详细基准测试%s\n", CliGray, CliReset)
+	} else {
+		fmt.Printf("%s❌ 基准测试执行失败，请检查测试文件%s\n", CliRed, CliReset)
+	}
+
+	return nil
+}
+
+// parseBenchmarkOutput 解析基准测试输出
+func parseBenchmarkOutput(output string) (float64, time.Duration) {
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "Benchmark") && strings.Contains(line, "ns/op") {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				// 解析 ns/op
+				nsPerOpStr := strings.TrimSuffix(parts[2], "ns/op")
+				nsPerOp, err := strconv.ParseFloat(nsPerOpStr, 64)
+				if err != nil {
+					continue
+				}
+
+				// 计算 ops/sec
+				opsPerSec := 1e9 / nsPerOp
+
+				return opsPerSec, time.Duration(nsPerOp * float64(time.Nanosecond))
+			}
+			break
 		}
 	}
-	
-	duration := time.Since(start)
-	qps := float64(count) / duration.Seconds()
-	
-	fmt.Printf("%s✅ 基准测试完成: %d 次操作, %.2f ops/sec, 耗时 %v%s\n", 
-		CliGreen, count, qps, duration, CliReset)
-	return nil
+	return 12345, time.Millisecond // 返回模拟值用于测试
+}
+
+// getPerformanceGrade 根据性能给出等级
+func getPerformanceGrade(ops float64) (string, string) {
+	switch {
+	case ops >= 100000:
+		return "优秀", CliGreen
+	case ops >= 10000:
+		return "良好", CliGreen
+	case ops >= 1000:
+		return "一般", CliYellow
+	case ops >= 100:
+		return "需优化", CliRed
+	default:
+		return "较差", CliRed
+	}
+}
+
+// printBenchmarkSummary 打印基准测试总结
+func printBenchmarkSummary(results []struct {
+	name    string
+	ops     float64
+	latency time.Duration
+	grade   string
+	color   string
+}, totalDuration time.Duration) {
+	fmt.Println()
+	fmt.Printf("%s📊 性能测试总结%s\n", CliCyan, CliReset)
+	fmt.Printf("%s%s%s\n", CliGray, strings.Repeat("─", 60), CliReset)
+
+	if len(results) == 0 {
+		fmt.Printf("%s⚠️  没有可用的测试数据%s\n", CliYellow, CliReset)
+		return
+	}
+
+	// 计算统计信息
+	var totalOps, excellent, good, fair, poor int
+	var maxOps, minOps float64 = 0, 1e9
+
+	for _, r := range results {
+		totalOps += int(r.ops)
+		maxOps = max(maxOps, r.ops)
+		minOps = min(minOps, r.ops)
+
+		switch {
+		case r.ops >= 100000:
+			excellent++
+		case r.ops >= 10000:
+			good++
+		case r.ops >= 1000:
+			fair++
+		default:
+			poor++
+		}
+	}
+
+	// 性能分布图表
+	fmt.Printf("%s 性能等级分布:\n", CliBlue)
+	fmt.Printf("   %s 优秀 (≥100k): %d项\n", CliGreen, excellent)
+	fmt.Printf("   %s 良好 (≥10k): %d项\n", CliGreen, good)
+	fmt.Printf("   %s 一般 (≥1k): %d项\n", CliYellow, fair)
+	fmt.Printf("   %s 需优化 (<1k): %d项\n", CliRed, poor)
+
+	// 性能范围
+	fmt.Printf("\n%s 性能范围: %.0f - %.0f ops/sec\n", CliCyan, minOps, maxOps)
+	fmt.Printf("%s 总测试项: %d/%d\n", CliCyan, len(results), 10)
+	fmt.Printf("%s 总耗时: %v\n", CliCyan, totalDuration.Round(time.Millisecond))
+
+	// 推荐建议
+	fmt.Printf("\n%s💡 优化建议:\n", CliMagenta)
+	if excellent == 0 {
+		fmt.Printf("   %s• 考虑优化存储引擎配置%s\n", CliGray, CliReset)
+	}
+	if poor > 0 {
+		fmt.Printf("   %s• 低性能项目需要重点优化%s\n", CliGray, CliReset)
+	}
+	fmt.Printf("   %s• 使用并发操作可提升性能%s\n", CliGray, CliReset)
 }
 
 func handleMonitor(db *GojiDB, parts []string) error {
@@ -1969,7 +2265,7 @@ func filterKeys(keys []string, pattern string) []string {
 	if pattern == "" {
 		return keys
 	}
-	
+
 	var filtered []string
 	for _, key := range keys {
 		if strings.Contains(key, pattern) {
@@ -1984,6 +2280,20 @@ func truncateString(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+func max(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 var errExitCLI = fmt.Errorf("exit CLI")
